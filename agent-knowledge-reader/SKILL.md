@@ -19,7 +19,7 @@ Prefer a user-confirmed registry name. List local registrations when the user di
 <python> scripts/read_knowledge.py list
 ```
 
-If no registration exists, ask for the published knowledge-base path. Do not scan the whole home directory or guess from project names. Registry paths are local configuration and must never be committed with the open-source Skill pack. Read [references/registry-contract.md](references/registry-contract.md) when configuring or troubleshooting locations.
+If no registration exists, ask for the published knowledge-base path. Do not scan the whole home directory or guess from project names. Registry paths are local configuration and must never be committed with the public Skill source pack. Read [references/registry-contract.md](references/registry-contract.md) when configuring or troubleshooting locations.
 
 ## Read for a task
 

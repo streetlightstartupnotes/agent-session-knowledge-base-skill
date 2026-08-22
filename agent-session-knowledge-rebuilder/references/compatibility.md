@@ -2,7 +2,7 @@
 
 Compatibility is format-specific and evidence-bound. The runtime build writes the current environment-specific matrix to `audit/compatibility-matrix.md`.
 
-Keep three claims separate: input-format compatibility, native execution-host compatibility, and real operating-system validation. The table below covers input formats only. This pack is natively packaged as a Codex Skill and also exposes a Python 3.9+ standard-library CLI. That CLI may be invoked from other environments, but no other Agent host may be described as Skill-compatible until its discovery, invocation, semantic-review, and handoff path has been exercised end to end.
+Keep three claims separate: input-format compatibility, execution-host compatibility, and real operating-system validation. The table below covers input formats only. This pack uses a `SKILL.md` workflow plus a Python 3.9+ standard-library CLI. An Agent host may be described as Skill-compatible only after its discovery, invocation, semantic-review, and handoff path has been exercised end to end; input parsing or the ability to open `SKILL.md` is not enough.
 
 | Agent / format | Adapter | Implementation | Verification status |
 | --- | --- | --- | --- |

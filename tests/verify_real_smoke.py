@@ -92,7 +92,7 @@ def main() -> int:
     except ValueError:
         pass
     else:
-        raise SystemExit("error: --output-root must be outside the open-source project tree")
+        raise SystemExit("error: --output-root must be outside the public project source tree")
     report_path = output_root / "smoke-report.json"
     failures: list[dict] = []
     case_reports: dict[str, dict] = {}

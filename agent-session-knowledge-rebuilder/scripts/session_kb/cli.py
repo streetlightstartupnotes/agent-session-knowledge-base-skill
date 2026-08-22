@@ -134,7 +134,7 @@ def make_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--kb", type=Path, required=True)
     distill_parser.add_argument("--review", type=Path, required=True)
 
-    release_parser = subparsers.add_parser("release-check", help="Fail closed if an open-source Skill tree contains private, secret, binary, session, or generated artifacts.")
+    release_parser = subparsers.add_parser("release-check", help="Fail closed if a public Skill source tree contains private, secret, binary, session, or generated artifacts.")
     release_parser.add_argument("--root", type=Path, required=True, help="Skill-pack source root to scan.")
     release_parser.add_argument("--deny-term", action="append", default=[], help="Private term that must not occur; repeatable and never echoed.")
     return parser

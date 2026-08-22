@@ -27,7 +27,7 @@ Read [references/execution-contract.md](references/execution-contract.md) before
 - Treat serialized `user` as provenance, not identity. Keep primary users, unknown users, customers, quoted sources, test actors, orchestrators, and subagents separate.
 - Strip binary bodies and redact credentials, cookies, contacts, private network addresses, and home paths from every generated artifact.
 - Never infer durable identity, preference, causality, ownership, or completion from keywords or Agent claims. Every published assertion needs valid event ids.
-- Generated knowledge, local registry files, validation outputs, and real sessions are private data. Never put them in the open-source Skill tree.
+- Generated knowledge, local registry files, validation outputs, and real sessions are private data. Never put them in the public Skill source tree.
 
 ## Choose the Python launcher
 
@@ -136,7 +136,7 @@ The companion `$agent-knowledge-reader` reads only task-relevant published docum
 
 Do not register without confirmation. The reader can also use an explicit `--kb` path without registry state.
 
-## 8. Open-source release gate
+## 8. Public source release gate
 
 Before packaging or committing this Skill pack, run:
 
@@ -144,6 +144,6 @@ Before packaging or committing this Skill pack, run:
 <python> agent-session-knowledge-rebuilder/scripts/session_kb.py release-check --root /path/to/skill-pack
 ```
 
-Add private names or identifiers with repeated `--deny-term` arguments when needed; matches are never echoed. A pass forbids secrets, contacts, private home paths, raw binary/Base64, real session/state files, generated knowledge/audit trees, symlinks, and validation output. Read [references/open-source-release.md](references/open-source-release.md).
+Add private names or identifiers with repeated `--deny-term` arguments when needed; matches are never echoed. A pass forbids secrets, contacts, private home paths, raw binary/Base64, real session/state files, generated knowledge/audit trees, symlinks, and validation output. Read [references/public-release.md](references/public-release.md).
 
 For generated schemas and completion gates, read [references/output-contract.md](references/output-contract.md).

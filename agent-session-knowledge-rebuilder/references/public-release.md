@@ -1,4 +1,4 @@
-# Open-source release contract
+# Public source release contract
 
 The repository contains executable Skill logic and generic documentation only. It must not contain real sessions, generated knowledge, audit output, local registry state, machine-specific validation reports, private paths, contacts, credentials, cookies, binary bodies, or a person's facts.
 

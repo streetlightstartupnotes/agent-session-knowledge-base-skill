@@ -59,4 +59,4 @@ Likewise, zero reported coverage gaps means zero gaps inside the declared discov
 
 ## Private local location registry
 
-The optional cross-platform registry maps a user-chosen name to a published knowledge-base root. It lives in the user's platform configuration directory and is never part of this output tree or the open-source Skill. Registration is an explicit post-publication action. The companion reader refuses draft indexes and can use either a registry name or an explicit path.
+The optional cross-platform registry maps a user-chosen name to a published knowledge-base root. It lives in the user's platform configuration directory and is never part of this output tree or the public Skill source pack. Registration is an explicit post-publication action. The companion reader refuses draft indexes and can use either a registry name or an explicit path.
