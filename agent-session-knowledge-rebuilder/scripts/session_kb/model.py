@@ -12,12 +12,16 @@ from . import SCHEMA_VERSION
 PATH_EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.])", re.IGNORECASE)
 PATH_PHONE_RE = re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)")
 PATH_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,})\b")
+PATH_UNIX_HOME_RE = re.compile(r"/(?:Users|home)/[^/\\\s\"'<>]+")
+PATH_WINDOWS_HOME_RE = re.compile(r"(?i)\b[A-Z]:[\\/]Users[\\/][^\\/\s\"'<>]+")
 
 
 def redact_path_text(value: str) -> str:
     value = PATH_TOKEN_RE.sub("[REDACTED-CREDENTIAL]", value)
     value = PATH_EMAIL_RE.sub("[REDACTED-EMAIL]", value)
     value = PATH_PHONE_RE.sub("[REDACTED-PHONE]", value)
+    value = PATH_WINDOWS_HOME_RE.sub("~", value)
+    value = PATH_UNIX_HOME_RE.sub("~", value)
     return value
 
 
@@ -31,6 +35,12 @@ def stable_hash(*parts: object, length: int = 64) -> str:
 
 def display_path(path: Path) -> str:
     try:
+        recorded = path.expanduser().as_posix()
+        # Check the recorded spelling before resolve(); on macOS, resolving an
+        # exported `/home/<account>` path may follow `/home` to a system volume
+        # and otherwise leave a misleading prefix before the redaction.
+        if PATH_UNIX_HOME_RE.search(recorded) or PATH_WINDOWS_HOME_RE.search(recorded):
+            return redact_path_text(recorded)
         home = Path.home().resolve()
         resolved = path.expanduser().resolve()
         if resolved == home:

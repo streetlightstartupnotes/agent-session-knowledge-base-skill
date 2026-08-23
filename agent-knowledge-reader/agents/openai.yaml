@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Knowledge Reader"
-  short_description: "Read only task-relevant reviewed Agent knowledge"
-  default_prompt: "Use $agent-knowledge-reader to load only published knowledge relevant to my current task, follow bounded confirmed links, and return no_match instead of guessing or loading everything."
+  short_description: "Read verified task-scoped Agent knowledge safely"
+  default_prompt: "Use $agent-knowledge-reader to load only verified knowledge relevant to my current task, apply active confirmed rules within scope, follow bounded confirmed links, and return no_match instead of guessing."

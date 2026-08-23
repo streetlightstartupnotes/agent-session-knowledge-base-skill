@@ -35,7 +35,9 @@ Set `metadata.transport_lane` when a format serializes the same visible event in
 
 ## Unified roles and event types
 
-Roles are `user`, `assistant`, `tool`, `system`, `observer`, or `unknown`. The pipeline refines them into actor kinds such as `primary_user`, `primary_agent`, `subagent`, `orchestrator`, `third_party`, `test_actor`, `runtime`, and `unknown_user`.
+Roles are `user`, `assistant`, `tool`, `system`, `observer`, or `unknown`. The pipeline records actor kinds such as `native_user`, `unknown_user`, `primary_agent`, `subagent`, `orchestrator`, `third_party`, `test_actor`, and `runtime`.
+
+`native_user` means only that the provider stored the event in its ordinary user lane. It is deliberately not `primary_user`. The semantic review must add a hash-bound `actor_attributions` record before a native or unknown user event can support primary-user identity, preference, approval, or feedback. Adapters must not solve this by labeling every native user record as the session owner.
 
 Prefer `message`, `tool_call`, `tool_result`, `patch`, `browser`, `device`, `attachment`, `status`, `delivery`, and `error`. Add a new type only when it changes downstream evidence handling.
 
@@ -43,17 +45,19 @@ Prefer `message`, `tool_call`, `tool_result`, `patch`, `browser`, `device`, `att
 
 Adapters must identify format-native compacted summaries, hidden reasoning, system/developer context, duplicated history records, and sidechains. The shared pipeline additionally detects runtime wrappers, external imports, delegated prompts, test roles, nested approvals, old-memory reads, sensitive data, and binary bodies.
 
-A serialized `user` role is not automatically the primary human. Sidechain user messages, tool results encoded as user blocks, client prompts, embedded transcripts, and imported sessions must carry a non-primary actor hint or risk flag. When provenance is ambiguous, use `unknown_user`; never guess.
+A serialized `user` role is not automatically the primary human. An adapter may use `native_user` only for a format's ordinary top-level user lane. Sidechain user messages, tool results encoded as user blocks, client prompts, embedded transcripts, and imported sessions must carry a non-primary actor hint or risk flag. When provenance is ambiguous, use `unknown_user`; never guess. Even `native_user` requires semantic attribution before promotion to primary-user evidence.
 
 ## Incremental requirements
 
 Declare `append_only=True` only for a format whose files append complete records. The pipeline verifies the old head and tail boundaries before starting at the saved complete-byte offset. If verification fails, it reparses the file and records the fallback. Whole JSON documents and mutable chunks must declare `append_only=False` and rely on event deduplication.
 
-Append-only adapters are invoked on newline-aligned bounded chunks. Their continuation context must be sufficient to continue sequence, session, parent, title, and working-directory state without loading the whole file. A partial final line is excluded as an incomplete tail and is retried on the next run.
+Append-only adapters are invoked on newline-aligned bounded chunks from the parse range, normally the new tail. The shared pipeline still reads the old prefix to verify append integrity and bind the actual-read stream digest to snapshot v2 `frozen_sha256`; tail-only parsing is not tail-only physical I/O. Adapter continuation context must be sufficient to continue sequence, session, parent, title, and working-directory state without reparsing the prefix. Tool calls and results must preserve stable call linkage so the pipeline can quarantine a delayed result from an old-memory call using an irreversible stored hash. Do not copy old-memory content or a raw call id into continuation context merely for that quarantine. A partial final line is excluded as an incomplete tail and is retried on the next run.
+
+`records_seen` and record locators must let the shared pipeline accumulate seen/accounted/unaccounted transport denominators per source. An adapter must not report only the retained semantic events as its transport denominator.
 
 ## Verification gate
 
-An adapter is compatible only after recognition and malformed-input tests, required unified-event fields, visible message/call/result/delivery handling, summary/runtime/reasoning exclusion, identity isolation, privacy and binary sanitization, incremental or safe-reparse behavior, and an end-to-end smoke test on a real sample of that exact format.
+An adapter is compatible only after recognition and malformed-input tests, required unified-event fields, visible message/call/result/delivery handling, summary/runtime/reasoning exclusion, native-user-lane isolation, privacy and binary sanitization, incremental or safe-reparse behavior, and an end-to-end smoke test on a real sample of that exact format.
 
 For this format-specific gate, end to end means discovery or explicit selection through freeze, parse, sanitization, deterministic disposition, draft output, and review-template hashing. Semantic claim writing is deliberately human-reviewed and format-independent; its validate, publish, and query path must also have its own end-to-end tests, but a format sample must never be given invented claims merely to exercise that path.
 

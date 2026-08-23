@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,14 +12,39 @@ from .adapters import AdapterRegistry, builtin_registry
 from .config import list_knowledge_bases, output_guidance, register_knowledge_base, validate_output_location
 from .discovery import DiscoveryResult, discover, freeze_sources, load_snapshot, source_from_snapshot
 from .inventory import inventory_environment
+from .locking import mutation_lock
 from .pipeline import build_knowledge_base
 from .query import query_knowledge
 from .release import release_check
 from .review import create_review_packet, create_review_template, distill_review, validate_review
+from .verification import verify_retrieval
 
 
 def _json_print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+
+
+def _write_json_exclusive(path: Path, value: Any) -> None:
+    """Create a JSON file once without an exists/write race."""
+
+    target = path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ValueError(f"snapshot already exists: {target}") from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _parse_source(value: str) -> tuple[str, Path]:
@@ -121,10 +147,13 @@ def make_parser() -> argparse.ArgumentParser:
     review_parser = subparsers.add_parser("review-init", help="Create a project-hashed semantic-review template for a rebuilt evidence layer.")
     review_parser.add_argument("--kb", type=Path, required=True, help="Knowledge-base root containing audit/events.jsonl.")
     review_parser.add_argument("--review", type=Path, help="Review JSON to create; defaults to KB/review/review.json.")
+    review_parser.add_argument("--from-review", type=Path, help="Carry forward only hash-identical reviewed projects and still-valid evidence records from a prior review.")
 
-    packet_parser = subparsers.add_parser("review-packet", help="Read one complete sanitized project chain without loading the entire corpus.")
+    packet_parser = subparsers.add_parser("review-packet", help="Read one complete sanitized project chain or a hash-bound contiguous range.")
     packet_parser.add_argument("--kb", type=Path, required=True)
     packet_parser.add_argument("--project-key", required=True)
+    packet_parser.add_argument("--start-event", type=int, default=0, help="Zero-based event index for a contiguous checkpoint range.")
+    packet_parser.add_argument("--max-events", type=int, help="Maximum events to return; omit for the complete project chain.")
 
     validate_parser = subparsers.add_parser("validate-review", help="Validate review coverage and claim provenance without publishing.")
     validate_parser.add_argument("--kb", type=Path, required=True)
@@ -134,9 +163,22 @@ def make_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--kb", type=Path, required=True)
     distill_parser.add_argument("--review", type=Path, required=True)
 
+    verify_parser = subparsers.add_parser("verify-retrieval", help="Verify one relevant and one unrelated task before final completion.")
+    verify_parser.add_argument("--kb", type=Path, required=True)
+    verify_parser.add_argument("--related-task", required=True, help="A task that must retrieve reviewed knowledge.")
+    verify_parser.add_argument("--unrelated-task", required=True, help="A task that must return no_match.")
+    verify_parser.add_argument("--expected-project-key", help="Optional project key that the related task must select.")
+
     release_parser = subparsers.add_parser("release-check", help="Fail closed if a public Skill source tree contains private, secret, binary, session, or generated artifacts.")
     release_parser.add_argument("--root", type=Path, required=True, help="Skill-pack source root to scan.")
     release_parser.add_argument("--deny-term", action="append", default=[], help="Private term that must not occur; repeatable and never echoed.")
+    release_parser.add_argument(
+        "--deny-term-file",
+        action="append",
+        type=Path,
+        default=[],
+        help="Private newline-delimited deny terms from a file outside the release root; repeatable and safer than command-line terms.",
+    )
     return parser
 
 
@@ -168,20 +210,40 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
     if args.command == "review-init":
-        _json_print(create_review_template(args.kb, args.review))
+        with mutation_lock(args.kb, "review-init"):
+            result = create_review_template(args.kb, args.review, args.from_review)
+        _json_print(result)
         return 0
     if args.command == "review-packet":
-        _json_print(create_review_packet(args.kb, args.project_key))
+        _json_print(create_review_packet(args.kb, args.project_key, args.start_event, args.max_events))
         return 0
     if args.command == "validate-review":
         _, events, errors = validate_review(args.kb, args.review)
         _json_print({"status": "passed" if not errors else "failed", "events": len(events), "errors": errors})
         return 0 if not errors else 2
     if args.command == "distill":
-        _json_print(distill_review(args.kb, args.review))
+        with mutation_lock(args.kb, "distill"):
+            result = distill_review(args.kb, args.review)
+        _json_print(result)
         return 0
+    if args.command == "verify-retrieval":
+        with mutation_lock(args.kb, "verify-retrieval"):
+            result = verify_retrieval(args.kb, args.related_task, args.unrelated_task, args.expected_project_key)
+        _json_print(result)
+        return 0 if result["status"] == "passed" else 2
     if args.command == "release-check":
-        result = release_check(args.root, args.deny_term)
+        release_root = args.root.expanduser().resolve()
+        deny_terms = list(args.deny_term)
+        for term_file in args.deny_term_file:
+            resolved = term_file.expanduser().resolve()
+            try:
+                resolved.relative_to(release_root)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("--deny-term-file must stay outside the public release root")
+            deny_terms.extend(line.strip() for line in resolved.read_text(encoding="utf-8").splitlines() if line.strip())
+        result = release_check(args.root, deny_terms)
         _json_print(result)
         return 0 if result["status"] == "passed" else 3
 
@@ -226,13 +288,14 @@ def run(args: argparse.Namespace) -> int:
 
     if args.command == "freeze":
         result = _discover_from_args(args, registry)
+        if not result.sources:
+            raise ValueError("no supported session files discovered; inspect discover output or specify --root/--source")
         snapshot = freeze_sources(result.sources)
         snapshot["discovery"] = result.to_dict()
+        if snapshot.get("errors") or snapshot.get("complete") is not True:
+            raise ValueError("freeze failed for one or more discovered sources; no snapshot was written")
         destination = args.snapshot.expanduser()
-        if destination.exists():
-            raise ValueError(f"snapshot already exists: {destination}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _write_json_exclusive(destination, snapshot)
         _json_print({"snapshot": str(destination.resolve()), "source_count": snapshot["source_count"], "errors": snapshot["errors"]})
         return 0
 
@@ -249,16 +312,29 @@ def run(args: argparse.Namespace) -> int:
         if not sources:
             raise ValueError("no supported session files discovered; inspect discover output or specify --root/--source")
         output = validate_output_location(output, sources)
-        result = build_knowledge_base(
-            registry,
-            sources,
-            output_dir=output,
-            discovery=discovery_result,
-            snapshot=snapshot,
-            incremental=args.incremental,
-            dry_run=args.dry_run,
-            verified_adapters=VERIFIED_ADAPTERS,
-        )
+        if args.dry_run:
+            result = build_knowledge_base(
+                registry,
+                sources,
+                output_dir=output,
+                discovery=discovery_result,
+                snapshot=snapshot,
+                incremental=args.incremental,
+                dry_run=True,
+                verified_adapters=VERIFIED_ADAPTERS,
+            )
+        else:
+            with mutation_lock(output, "incremental-rebuild" if args.incremental else "rebuild"):
+                result = build_knowledge_base(
+                    registry,
+                    sources,
+                    output_dir=output,
+                    discovery=discovery_result,
+                    snapshot=snapshot,
+                    incremental=args.incremental,
+                    dry_run=False,
+                    verified_adapters=VERIFIED_ADAPTERS,
+                )
         _json_print(result)
         return 0
     raise ValueError(f"unknown command: {args.command}")

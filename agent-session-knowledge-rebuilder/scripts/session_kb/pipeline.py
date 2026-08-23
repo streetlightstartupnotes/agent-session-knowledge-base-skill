@@ -10,14 +10,15 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from . import SCHEMA_VERSION
 from .adapters import AdapterRegistry
-from .discovery import DiscoveryResult, freeze_sources
+from .discovery import DiscoveryResult, freeze_sources, validate_snapshot
 from .model import ParseResult, SourceFile, UnifiedEvent, display_path, stable_hash
 from .render import compatibility_markdown, render_knowledge
-from .sanitize import Sanitizer, actor_kind, classify_flags, evidence_grade
+from .sanitize import SANITIZER_POLICY_VERSION, Sanitizer, actor_kind, classify_flags, evidence_grade
+from .verification import publication_manifest
 
 
-BOUNDARY_BYTES = 65536
 STREAM_CHUNK_BYTES = 8 * 1024 * 1024
 
 
@@ -75,28 +76,37 @@ def _parse_frozen_source(
     source: SourceFile,
     start_offset: int,
     context: dict[str, Any],
-) -> tuple[ParseResult, int]:
+) -> tuple[ParseResult, int, str]:
     """Parse append-only JSONL in bounded chunks while honoring the frozen byte end."""
     byte_count = source.frozen_size - start_offset
     if byte_count < 0:
         raise ValueError("source frozen size is smaller than the requested start offset")
     if not adapter.append_only:
-        data = _read_exact(source.path, start_offset, source.frozen_size)
+        frozen_data = _read_exact(source.path, 0, source.frozen_size)
+        data = frozen_data[start_offset:]
         parse_context = dict(context)
         parse_context["_start_offset"] = start_offset
-        return adapter.parse(data, source, context=parse_context), len(data)
+        return adapter.parse(data, source, context=parse_context), len(data), sha256(frozen_data).hexdigest()
 
     total = ParseResult(context=dict(context), last_complete_offset=start_offset)
+    frozen_digest = sha256()
     buffer = b""
     buffer_start = start_offset
     position = start_offset
     with source.path.open("rb") as handle:
-        handle.seek(start_offset)
+        remaining_prefix = start_offset
+        while remaining_prefix:
+            prefix_chunk = handle.read(min(STREAM_CHUNK_BYTES, remaining_prefix))
+            if not prefix_chunk:
+                raise OSError("source shorter than the verified incremental prefix")
+            frozen_digest.update(prefix_chunk)
+            remaining_prefix -= len(prefix_chunk)
         while position < source.frozen_size:
             wanted = min(STREAM_CHUNK_BYTES, source.frozen_size - position)
             chunk = handle.read(wanted)
             if len(chunk) != wanted:
                 raise OSError(f"source shorter than frozen range: wanted {wanted}, got {len(chunk)}")
+            frozen_digest.update(chunk)
             position += len(chunk)
             buffer += chunk
             newline = buffer.rfind(b"\n")
@@ -114,26 +124,13 @@ def _parse_frozen_source(
             parse_context["_start_offset"] = buffer_start
             part = adapter.parse(buffer, source, context=parse_context)
             _merge_parse_results(total, part)
-    return total, byte_count
+    return total, byte_count, frozen_digest.hexdigest()
 
 
 def _hash_range(path: Path, start: int, length: int) -> str:
     if length <= 0:
         return sha256(b"").hexdigest()
     return sha256(_read_exact(path, start, start + length)).hexdigest()
-
-
-def _boundary_state(path: Path, frozen_size: int) -> dict[str, Any]:
-    head_length = min(BOUNDARY_BYTES, frozen_size)
-    tail_length = min(BOUNDARY_BYTES, frozen_size)
-    tail_start = max(0, frozen_size - tail_length)
-    return {
-        "head_length": head_length,
-        "head_sha256": _hash_range(path, 0, head_length),
-        "tail_start": tail_start,
-        "tail_length": tail_length,
-        "tail_sha256": _hash_range(path, tail_start, tail_length),
-    }
 
 
 def _append_verified(path: Path, source: SourceFile, previous: dict[str, Any]) -> bool:
@@ -143,16 +140,9 @@ def _append_verified(path: Path, source: SourceFile, previous: dict[str, Any]) -
     old_inode = int(previous.get("inode", 0))
     if old_inode and source.inode and old_inode != source.inode:
         return False
-    if source.frozen_size == old_size:
-        return source.mtime_ns == int(previous.get("mtime_ns", -1))
     try:
-        head_length = int(previous.get("head_length", 0))
-        tail_start = int(previous.get("tail_start", 0))
-        tail_length = int(previous.get("tail_length", 0))
-        return (
-            _hash_range(path, 0, head_length) == previous.get("head_sha256")
-            and _hash_range(path, tail_start, tail_length) == previous.get("tail_sha256")
-        )
+        expected = str(previous.get("frozen_sha256") or "")
+        return bool(expected) and _hash_range(path, 0, old_size) == expected
     except (OSError, ValueError):
         return False
 
@@ -204,6 +194,11 @@ def _load_events(path: Path) -> list[UnifiedEvent]:
     return events
 
 
+def _event_semantic_fingerprint(event: UnifiedEvent) -> str:
+    payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _load_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
@@ -224,22 +219,41 @@ def _load_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
 def _display_working_dir(raw: str | None, sanitizer: Sanitizer) -> str | None:
     if not raw:
         return None
-    try:
-        return sanitizer.sanitize_text(display_path(Path(raw)))
-    except (OSError, ValueError):
-        return sanitizer.sanitize_text(raw)
+    # Session metadata may have been exported from another machine. Resolving
+    # that path on the current host can follow unrelated symlinks and produce a
+    # misleading or partially redacted location. Sanitize the recorded value
+    # directly; use its raw value only as an in-memory project-key hash input.
+    return sanitizer.sanitize_text(raw)
 
 
-def _project_identity(raw_project_id: str | None, working_dir: str | None, agent: str, session_id: str) -> tuple[str, str]:
-    if working_dir and working_dir not in {"~", "/", ".", "unknown"}:
-        label = Path(working_dir).name or working_dir
-        return "cwd:" + stable_hash(working_dir, length=24), label
+def _project_identity(
+    raw_project_id: str | None,
+    raw_working_dir: str | None,
+    display_working_dir: str | None,
+    agent: str,
+    session_id: str,
+) -> tuple[str, str]:
+    if raw_working_dir and raw_working_dir not in {"~", "/", ".", "unknown"}:
+        canonical = re.sub(r"[\\/]+", "/", str(raw_working_dir).strip()).rstrip("/")
+        if re.match(r"^[A-Za-z]:/", canonical):
+            canonical = canonical[0].lower() + canonical[1:]
+        display_value = display_working_dir or "private-project"
+        label = re.split(r"[\\/]", display_value.rstrip("/\\"))[-1] or display_value
+        # Hash the unsanitized identity without ever persisting it. Hashing the
+        # redacted display path would merge different accounts such as two
+        # exported /home/<account>/work trees into one project proposal.
+        return "cwd:" + stable_hash(canonical, length=24), label
     if raw_project_id:
         return "project:" + stable_hash(agent, raw_project_id, length=24), str(raw_project_id)
     return "", f"Session {session_id[:12]}"
 
 
-def _normalize_raw_event(raw: Any, source: SourceFile, sanitizer: Sanitizer) -> tuple[UnifiedEvent | None, str | None]:
+def _normalize_raw_event(
+    raw: Any,
+    source: SourceFile,
+    sanitizer: Sanitizer,
+    project_identities: dict[str, dict[str, str]] | None = None,
+) -> tuple[UnifiedEvent | None, str | None]:
     content = sanitizer.sanitize_text(raw.content)
     flags = classify_flags(content, raw.flags)
     if "[BINARY_REMOVED" in content:
@@ -260,7 +274,15 @@ def _normalize_raw_event(raw: Any, source: SourceFile, sanitizer: Sanitizer) -> 
         if flag in flags:
             return None, reason
     working_dir = _display_working_dir(raw.working_dir, sanitizer)
-    project_key, project_label = _project_identity(raw.project_id, working_dir, source.agent_name, raw.session_id)
+    identity_marker = stable_hash("source-session-project", source.source_file_id, raw.session_id, length=32)
+    prior_identity = (project_identities or {}).get(identity_marker)
+    if prior_identity:
+        project_key = str(prior_identity.get("project_key") or "")
+        project_label = str(prior_identity.get("project_label") or working_dir or f"Session {raw.session_id[:12]}")
+    else:
+        project_key, project_label = _project_identity(raw.project_id, raw.working_dir, working_dir, source.agent_name, raw.session_id)
+        if project_identities is not None:
+            project_identities[identity_marker] = {"project_key": project_key, "project_label": project_label}
     content_hash = sha256(content.encode("utf-8")).hexdigest()
     provisional_id = "evt-" + stable_hash(
         source.source_file_id,
@@ -464,6 +486,8 @@ def _sensitive_count(stats: Counter[str]) -> int:
             "credential_fields_redacted",
             "email_redactions",
             "phone_redactions",
+            "private_ip_redactions",
+            "home_path_redactions",
         )
     )
 
@@ -482,6 +506,7 @@ def build_knowledge_base(
     if output_dir.exists() and any(output_dir.iterdir()) and not incremental and not dry_run:
         raise ValueError("output directory is not empty; use --incremental or choose a new output")
     snapshot_value = snapshot or freeze_sources(sources)
+    validate_snapshot(snapshot_value, sources)
     snapshot_sources = {
         str(item.get("source_file_id")): item
         for item in snapshot_value.get("sources", [])
@@ -489,18 +514,36 @@ def build_knowledge_base(
     }
     previous_state = _load_json(output_dir / "audit" / "state.json", {"sources": {}}) if incremental else {"sources": {}}
     previous_events = _load_events(output_dir / "audit" / "events.jsonl") if incremental else []
+    previous_completion = _load_json(output_dir / "audit" / "completion-report.json", {}) if incremental else {}
+    previous_index = _load_json(output_dir / "knowledge" / "knowledge-index.json", {}) if incremental else {}
+    previous_unsupported = _load_json(output_dir / "audit" / "unsupported-formats.json", []) if incremental else []
+    previous_coverage_gaps = _load_json(output_dir / "audit" / "coverage-gaps.json", []) if incremental else []
+    schema_policy_changed = bool(
+        incremental
+        and previous_state.get("sources")
+        and (
+            previous_state.get("schema_version") != SCHEMA_VERSION
+            or previous_state.get("sanitizer_policy_version") != SANITIZER_POLICY_VERSION
+        )
+    )
     source_state: dict[str, Any] = {}
-    retained_previous = list(previous_events)
+    retained_previous = [] if schema_policy_changed else list(previous_events)
     new_events: list[UnifiedEvent] = []
-    excluded: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "excluded.jsonl") if incremental else []
-    errors: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "errors.jsonl") if incremental else []
-    dispositions: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "dispositions.jsonl") if incremental else []
+    excluded: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "excluded.jsonl") if incremental and not schema_policy_changed else []
+    errors: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "errors.jsonl") if incremental and not schema_policy_changed else []
+    dispositions: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "dispositions.jsonl") if incremental and not schema_policy_changed else []
     counters: Counter[str] = Counter()
     sanitizer = Sanitizer()
-    old_memory_calls: set[tuple[str, str]] = set()
+    if schema_policy_changed:
+        counters["schema_or_sanitizer_policy_reparse"] = 1
 
     for source in sources:
         counters["source_files"] += 1
+        previous = None if schema_policy_changed else previous_state.get("sources", {}).get(source.source_file_id)
+        prior_source_events = [] if schema_policy_changed else [event for event in retained_previous if event.source_file_id == source.source_file_id]
+        prior_source_excluded = [] if schema_policy_changed else [item for item in excluded if item.get("source_file_id") == source.source_file_id]
+        prior_source_errors = [] if schema_policy_changed else [item for item in errors if item.get("source_file_id") == source.source_file_id]
+        prior_source_dispositions = [] if schema_policy_changed else [item for item in dispositions if item.get("source_file_id") == source.source_file_id]
         frozen_manifest = snapshot_sources.get(source.source_file_id, {})
         if frozen_manifest.get("head_sha256"):
             try:
@@ -522,8 +565,13 @@ def build_knowledge_base(
                 )
                 dispositions.append(_transport_disposition(source.source_file_id, "source", "parse_error", error="source_boundary_changed_before_read"))
                 counters["parse_errors"] += 1
+                # Keep the last verified boundary and parser context. Without this,
+                # the following incremental run cannot identify the retained events
+                # as belonging to a source that must be replaced by a full reparse.
+                if previous:
+                    source_state[source.source_file_id] = previous
+                    counters["stale_source_states_preserved"] += 1
                 continue
-        previous = previous_state.get("sources", {}).get(source.source_file_id)
         adapter = registry.get(source.adapter)
         start_offset = 0
         full_reparse = True
@@ -532,16 +580,22 @@ def build_knowledge_base(
                 start_offset = int(previous.get("last_complete_offset", 0))
                 full_reparse = False
                 counters["append_files_verified"] += 1
-            elif not adapter.append_only and source.frozen_size == int(previous.get("frozen_size", -1)) and source.mtime_ns == int(previous.get("mtime_ns", -2)):
+            elif not adapter.append_only and source.frozen_size == int(previous.get("frozen_size", -1)) and _append_verified(source.path, source, previous):
                 source_state[source.source_file_id] = previous
                 counters["unchanged_files_skipped"] += 1
                 continue
             else:
                 counters["reparsed_files"] += 1
-                retained_previous = [event for event in retained_previous if event.source_file_id != source.source_file_id]
-                excluded = [item for item in excluded if item.get("source_file_id") != source.source_file_id]
-                errors = [item for item in errors if item.get("source_file_id") != source.source_file_id]
-                dispositions = [item for item in dispositions if item.get("source_file_id") != source.source_file_id]
+        if incremental and full_reparse:
+            # Clean by source id even when an older failed run lost its source
+            # state. This prevents retained old events from being combined with a
+            # successful recovery parse on the next run.
+            had_retained_source = any(event.source_file_id == source.source_file_id for event in retained_previous)
+            retained_previous = [event for event in retained_previous if event.source_file_id != source.source_file_id]
+            excluded = [item for item in excluded if item.get("source_file_id") != source.source_file_id]
+            errors = [item for item in errors if item.get("source_file_id") != source.source_file_id]
+            dispositions = [item for item in dispositions if item.get("source_file_id") != source.source_file_id]
+            if previous or had_retained_source:
                 errors.append(
                     {
                         "source_file_id": source.source_file_id,
@@ -549,21 +603,64 @@ def build_knowledge_base(
                         "error": "incremental_fallback_full_reparse",
                     }
                 )
+        isolated_call_hashes = {
+            str(value)
+            for value in ((previous or {}).get("isolated_call_hashes") or [])
+            if not full_reparse and isinstance(value, str)
+        }
+        project_identities = {
+            str(key): {"project_key": str(item.get("project_key") or ""), "project_label": str(item.get("project_label") or "")}
+            for key, item in ((previous or {}).get("project_identities") or {}).items()
+            if not full_reparse and isinstance(item, dict)
+        }
         try:
             context = dict(previous.get("context", {})) if previous and not full_reparse else {}
-            parsed, parsed_bytes = _parse_frozen_source(adapter, source, start_offset, context)
-            counters["bytes_read"] += parsed_bytes
+            parsed, parsed_bytes, parsed_frozen_digest = _parse_frozen_source(adapter, source, start_offset, context)
+            integrity_bytes = (source.frozen_size - parsed_bytes) + (start_offset if start_offset else 0)
+            counters["bytes_parsed"] += parsed_bytes
+            counters["bytes_read"] += parsed_bytes + integrity_bytes
+            counters["integrity_bytes_read"] += integrity_bytes
             if start_offset:
-                counters["incremental_bytes_read"] += parsed_bytes
+                counters["incremental_bytes_parsed"] += parsed_bytes
+                counters["incremental_bytes_read"] += parsed_bytes + integrity_bytes
+                counters["incremental_integrity_bytes_read"] += integrity_bytes
+                counters["append_verification_bytes_read"] += start_offset
+                counters["parsed_prefix_integrity_bytes_read"] += start_offset
             elif incremental:
+                counters["full_reparse_bytes_parsed"] += parsed_bytes
                 counters["full_reparse_bytes_read"] += parsed_bytes
         except (OSError, ValueError) as exc:
-            errors.append({"source_file_id": source.source_file_id, "path": display_path(source.path), "error": "source_read_error", "detail": str(exc)})
+            errors.append({"source_file_id": source.source_file_id, "path": display_path(source.path), "error": "source_read_error", "detail_type": type(exc).__name__})
             dispositions.append(_transport_disposition(source.source_file_id, "source", "parse_error", error="source_read_error"))
             counters["parse_errors"] += 1
             continue
+        if parsed_frozen_digest != str(frozen_manifest.get("frozen_sha256") or ""):
+            retained_previous = [event for event in retained_previous if event.source_file_id != source.source_file_id] + prior_source_events
+            excluded = [item for item in excluded if item.get("source_file_id") != source.source_file_id] + prior_source_excluded
+            errors = [item for item in errors if item.get("source_file_id") != source.source_file_id] + prior_source_errors
+            dispositions = [item for item in dispositions if item.get("source_file_id") != source.source_file_id] + prior_source_dispositions
+            errors.append({"source_file_id": source.source_file_id, "path": display_path(source.path), "error": "source_boundary_changed_during_read"})
+            dispositions.append(_transport_disposition(source.source_file_id, "source", "parse_error", error="source_boundary_changed_during_read"))
+            counters["parse_errors"] += 1
+            if previous:
+                source_state[source.source_file_id] = previous
+                counters["stale_source_states_preserved"] += 1
+            continue
         counters["parsed_files"] += 1
         counters["records_seen"] += parsed.records_seen
+        parsed_accounted_locators = {
+            _canonical_record_locator(str(item.record_locator)) for item in parsed.events
+        } | {
+            _canonical_record_locator(str(item.get("record_locator") or "unknown"))
+            for item in (list(parsed.excluded) + list(parsed.errors))
+            if str(item.get("record_locator") or "unknown") not in {"document", "preamble", "unknown"}
+        }
+        batch_transport_seen = parsed.records_seen
+        batch_transport_accounted = min(parsed.records_seen, len(parsed_accounted_locators))
+        batch_transport_unaccounted = max(0, parsed.records_seen - len(parsed_accounted_locators))
+        previous_transport_seen = int((previous or {}).get("transport_records_seen", 0)) if not full_reparse else 0
+        previous_transport_accounted = int((previous or {}).get("transport_records_accounted", 0)) if not full_reparse else 0
+        previous_transport_unaccounted = int((previous or {}).get("transport_records_unaccounted", 0)) if not full_reparse else 0
         counters["excluded_records"] += len(parsed.excluded)
         counters["parse_errors"] += len(parsed.errors)
         for item in parsed.excluded:
@@ -587,7 +684,7 @@ def build_knowledge_base(
                 )
             )
         for raw in parsed.events:
-            event, exclusion_reason = _normalize_raw_event(raw, source, sanitizer)
+            event, exclusion_reason = _normalize_raw_event(raw, source, sanitizer, project_identities)
             if exclusion_reason:
                 excluded.append({"source_file_id": source.source_file_id, "record_locator": raw.record_locator, "reason": exclusion_reason})
                 dispositions.append(
@@ -603,22 +700,25 @@ def build_knowledge_base(
             assert event is not None
             if "old_memory_reference" in event.flags and event.event_type in {"tool_call", "patch"}:
                 if event.call_id:
-                    old_memory_calls.add((source.source_file_id, event.call_id))
+                    isolated_call_hashes.add(stable_hash("old-memory-call", source.source_file_id, event.call_id))
                 excluded.append({"source_file_id": source.source_file_id, "record_locator": raw.record_locator, "reason": "old_memory_read"})
                 dispositions.append(_transport_disposition(source.source_file_id, raw.record_locator, "quarantined", reason="old_memory_read"))
                 counters["excluded_records"] += 1
                 continue
-            if event.call_id and (source.source_file_id, event.call_id) in old_memory_calls and event.event_type == "tool_result":
+            if (
+                event.call_id
+                and stable_hash("old-memory-call", source.source_file_id, event.call_id) in isolated_call_hashes
+                and event.event_type == "tool_result"
+            ):
                 excluded.append({"source_file_id": source.source_file_id, "record_locator": raw.record_locator, "reason": "old_memory_read_result"})
                 dispositions.append(_transport_disposition(source.source_file_id, raw.record_locator, "quarantined", reason="old_memory_read_result"))
                 counters["excluded_records"] += 1
                 continue
             new_events.append(event)
-        try:
-            boundary = _boundary_state(source.path, source.frozen_size)
-        except OSError as exc:
-            boundary = {}
-            errors.append({"source_file_id": source.source_file_id, "error": "boundary_hash_error", "detail": str(exc)})
+        boundary = {
+            field: frozen_manifest.get(field)
+            for field in ("head_length", "head_sha256", "tail_start", "tail_length", "tail_sha256", "frozen_sha256")
+        }
         safe_context = sanitizer.sanitize_mapping(parsed.context)
         source_state[source.source_file_id] = {
             "path": display_path(source.path),
@@ -629,6 +729,14 @@ def build_knowledge_base(
             "inode": source.inode,
             "last_complete_offset": parsed.last_complete_offset,
             "context": safe_context,
+            # Store only irreversible call-id hashes. This lets an append-only
+            # tail quarantine a tool result whose old-memory call appeared in a
+            # prior run without retaining the raw identifier.
+            "isolated_call_hashes": sorted(isolated_call_hashes),
+            "project_identities": project_identities,
+            "transport_records_seen": previous_transport_seen + batch_transport_seen,
+            "transport_records_accounted": previous_transport_accounted + batch_transport_accounted,
+            "transport_records_unaccounted": previous_transport_unaccounted + batch_transport_unaccounted,
             **boundary,
         }
         try:
@@ -653,6 +761,10 @@ def build_knowledge_base(
                     "error": "previous_source_missing_events_preserved",
                 }
             )
+
+    counters["transport_records_seen"] = sum(int(item.get("transport_records_seen", 0)) for item in source_state.values())
+    counters["transport_records_accounted"] = sum(int(item.get("transport_records_accounted", 0)) for item in source_state.values())
+    counters["transport_records_unaccounted"] = sum(int(item.get("transport_records_unaccounted", 0)) for item in source_state.values())
 
     combined = retained_previous + new_events
     self_sessions = _self_reconstruction_sessions(combined, output_dir)
@@ -710,14 +822,6 @@ def build_knowledge_base(
     counters["retained_events"] = len(events)
     counters.update(sanitizer.stats)
     counters["sensitive_redactions"] = _sensitive_count(sanitizer.stats)
-    accounted_records = {
-        (item["source_file_id"], item["canonical_record_locator"])
-        for item in dispositions
-        if item.get("canonical_record_locator") not in {"source", "document", "preamble", "unknown"}
-    }
-    counters["transport_records_accounted"] = len(accounted_records)
-    counters["transport_records_unaccounted"] = max(0, counters["records_seen"] - len(accounted_records))
-
     def unique_dicts(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         unique: list[dict[str, Any]] = []
         seen_rows: set[str] = set()
@@ -746,8 +850,16 @@ def build_knowledge_base(
     current_event_ids = {event.event_id for event in events}
     added_event_ids = sorted(current_event_ids - previous_event_ids)
     removed_event_ids = sorted(previous_event_ids - current_event_ids)
+    previous_by_id = {event.event_id: event for event in previous_events}
+    current_by_id = {event.event_id: event for event in events}
+    modified_event_ids = sorted(
+        event_id
+        for event_id in previous_event_ids & current_event_ids
+        if _event_semantic_fingerprint(previous_by_id[event_id]) != _event_semantic_fingerprint(current_by_id[event_id])
+    )
     added_event_set = set(added_event_ids)
     removed_event_set = set(removed_event_ids)
+    modified_event_set = set(modified_event_ids)
     affected_projects = sorted(
         {
             event.project_key
@@ -759,17 +871,27 @@ def build_knowledge_base(
             for event in previous_events
             if event.event_id in removed_event_set and event.project_key
         }
+        | {
+            event.project_key
+            for event in events + previous_events
+            if event.event_id in modified_event_set and event.project_key
+        }
     )
+    if schema_policy_changed:
+        affected_projects = sorted({event.project_key for event in events if event.project_key})
     impact = {
         "impact_version": 1,
         "run_id": run_id,
         "incremental": incremental,
         "added_event_count": len(added_event_ids),
         "removed_event_count": len(removed_event_ids),
+        "modified_event_count": len(modified_event_ids),
         "affected_project_keys": affected_projects,
         "added_event_ids": added_event_ids,
         "removed_event_ids": removed_event_ids,
-        "review_required": bool(added_event_ids or removed_event_ids or not incremental),
+        "modified_event_ids": modified_event_ids,
+        "review_required": bool(added_event_ids or removed_event_ids or modified_event_ids or schema_policy_changed or not incremental),
+        "schema_or_sanitizer_policy_changed": schema_policy_changed,
     }
     stats = dict(sorted(counters.items()))
     stats.update(
@@ -782,24 +904,81 @@ def build_knowledge_base(
             "new_events_parsed": len(new_events),
         }
     )
-    knowledge_documents, _ = render_knowledge(events, stats, run_id)
     unsupported = discovery.unsupported if discovery else []
     coverage_gaps = discovery.coverage_gaps if discovery else []
+    discovery_errors = discovery.errors if discovery else []
+    boundary_fields = ("frozen_size", "frozen_sha256", "head_sha256", "head_length", "tail_sha256", "tail_start", "tail_length", "last_complete_offset")
+    previous_source_signatures = {
+        str(source_id): tuple(value.get(field) for field in boundary_fields)
+        for source_id, value in (previous_state.get("sources") or {}).items()
+        if isinstance(value, dict)
+    }
+    current_source_signatures = {
+        str(source_id): tuple(value.get(field) for field in boundary_fields)
+        for source_id, value in source_state.items()
+        if isinstance(value, dict)
+    }
+    source_denominator_changed = bool(incremental and previous_source_signatures != current_source_signatures)
+    impact["source_denominator_changed"] = source_denominator_changed
+    if source_denominator_changed:
+        impact["review_required"] = True
+    prior_gates = previous_completion.get("gates") if isinstance(previous_completion.get("gates"), dict) else {}
+    previous_manifest_valid = False
+    expected_manifest = str(previous_completion.get("publication_manifest_sha256") or "")
+    if expected_manifest and previous_index.get("semantic_status") == "published":
+        try:
+            previous_manifest_valid = publication_manifest(output_dir, previous_index)["sha256"] == expected_manifest
+        except (OSError, ValueError, json.JSONDecodeError):
+            previous_manifest_valid = False
+    preserve_published = bool(
+        incremental
+        and not added_event_ids
+        and not removed_event_ids
+        and not modified_event_ids
+        and not schema_policy_changed
+        and not source_denominator_changed
+        and counters["parse_errors"] == 0
+        and counters["missing_previous_sources_preserved"] == 0
+        and not discovery_errors
+        and previous_index.get("semantic_status") == "published"
+        and previous_index.get("run_id") == previous_completion.get("run_id")
+        and previous_completion.get("status") in {"complete", "complete_with_unsupported_formats"}
+        and prior_gates.get("published_knowledge") is True
+        and prior_gates.get("retrieval_related_match") is True
+        and prior_gates.get("retrieval_unrelated_no_match") is True
+        and previous_manifest_valid
+        and previous_unsupported == unsupported
+        and previous_coverage_gaps == coverage_gaps
+    )
+    impact["publication_preserved"] = preserve_published
+    impact["previous_publication_manifest_valid"] = previous_manifest_valid
+    impact["published_run_id"] = previous_completion.get("run_id") if preserve_published else None
+    knowledge_documents: dict[str, str] = {}
+    if not preserve_published:
+        knowledge_documents, _ = render_knowledge(events, stats, run_id)
     matrix = compatibility_markdown(dict(adapter_counts), verified_adapters=verified_adapters)
-    state = {"state_version": 1, "run_id": run_id, "sources": source_state}
-    completion = {
-        "report_version": 1,
+    state = {
+        "state_version": 2,
+        "schema_version": SCHEMA_VERSION,
+        "sanitizer_policy_version": SANITIZER_POLICY_VERSION,
+        "run_id": run_id,
+        "sources": source_state,
+    }
+    completion = previous_completion if preserve_published else {
+        "report_version": 2,
         "run_id": run_id,
         "status": "needs_semantic_review",
         "gates": {
             "frozen_snapshot": bool(snapshot_value.get("sources")),
             "transport_accounted": counters["transport_records_unaccounted"] == 0,
             "parse_clean": counters["parse_errors"] == 0,
-            "discovery_coverage_complete": not coverage_gaps,
+            "discovery_coverage_complete": not coverage_gaps and not discovery_errors,
             "unsupported_formats_clear": not unsupported,
             "semantic_review_complete": False,
             "knowledge_graph_complete": False,
             "published_knowledge": False,
+            "retrieval_related_match": False,
+            "retrieval_unrelated_no_match": False,
         },
         "notes": [
             "Rebuild completed the deterministic evidence layer only.",
@@ -817,7 +996,8 @@ def build_knowledge_base(
         "event_count": len(events),
         "completion": completion,
         "impact": impact,
-        "would_write": [] if dry_run else ["knowledge", "audit"],
+        "would_write": [] if dry_run else (["audit"] if preserve_published else ["knowledge", "audit"]),
+        "publication_preserved": preserve_published,
     }
     if dry_run:
         return result
@@ -835,12 +1015,14 @@ def build_knowledge_base(
     _write_json(audit_dir / "coverage-gaps.json", coverage_gaps)
     _write_json(audit_dir / "state.json", state)
     _write_json(audit_dir / "snapshot.json", snapshot_value)
-    _write_json(audit_dir / "completion-report.json", completion)
+    if not preserve_published:
+        _write_json(audit_dir / "completion-report.json", completion)
     _write_json(audit_dir / "impact-report.json", impact)
     _write_json(audit_dir / "snapshots" / f"{run_id}.json", snapshot_value)
     _atomic_write_text(audit_dir / "compatibility-matrix.md", matrix)
     if discovery:
         _write_json(audit_dir / "discovery.json", discovery.to_dict())
-    for relative, content in knowledge_documents.items():
-        _atomic_write_text(knowledge_dir / relative, content)
+    if not preserve_published:
+        for relative, content in knowledge_documents.items():
+            _atomic_write_text(knowledge_dir / relative, content)
     return result

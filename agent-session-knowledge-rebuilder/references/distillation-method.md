@@ -2,7 +2,7 @@
 
 Use this reference after deterministic parsing and before claiming that the knowledge base is rebuilt. It generalizes lessons from a large, failure-preserving session reconstruction without carrying any person's facts into the Skill.
 
-## Why the pipeline has two layers and four gates
+## Why the pipeline has two layers and staged gates
 
 The deterministic layer is good at coverage, format handling, binary removal, redaction, deduplication, continuation merging, event ids, and incremental state. It cannot reliably decide that a first-person test prompt is a durable identity fact, that an Agent completion statement is true, or that two similarly named efforts are one project.
 
@@ -15,15 +15,19 @@ Keep four denominators separate throughout the run:
 3. sanitized retained events with an explicit semantic disposition;
 4. published claims and project assertions with valid evidence links.
 
-The corresponding gates are freeze, ingest, review, and publish. A later gate cannot repair an unaccounted earlier denominator. `audit/completion-report.json` is the machine-readable authority for which gates passed.
+The corresponding evidence gates are freeze, ingest, review, and publish. Publication is followed by two retrieval gates: a related task must match and an unrelated task must return `no_match`. A later gate cannot repair an unaccounted earlier denominator. `audit/completion-report.json` is the machine-readable authority for which gates passed.
 
 ## Distill in four passes
 
 ### 1. Freeze and account for coverage
 
-Start from the immutable snapshot and audit statistics. Resolve parser errors and unsupported candidates before interpreting content. Record the actual denominator, changed files, excluded classes, fallback reparses, and unreadable material. “Discovered,” “opened,” “parsed,” and “semantically reviewed” are separate states.
+Start from a complete immutable snapshot version 2. Every requested source needs a full frozen-byte digest and matching source/discovery denominator; any freeze error writes no snapshot, and incomplete manifests are unusable. Snapshot creation is exclusive and never overwrites an old denominator. Resolve parser errors and unsupported candidates before interpreting content. Record the actual denominator, changed files, excluded classes, fallback reparses, and unreadable material. “Discovered,” “opened,” “integrity-read,” “parsed,” and “semantically reviewed” are separate states.
 
 Do not chase files created after the snapshot during the same run. They belong to the next incremental snapshot. This prevents the reconstruction process from repeatedly consuming its own new transcript.
+
+For an append-only source, parser work may be tail-only while physical I/O is not: the old prefix is read for full-prefix integrity and actual-stream digest binding. Report parsed bytes separately from integrity bytes. If a sampled boundary or the actual-read full digest differs from the snapshot, preserve the previous verified state and fail that source rather than advancing an untrusted cursor. This catches middle changes and ABA-style matching metadata/boundaries when content differs. On a later consistent snapshot, full-reparse recovery must replace the source's retained events and audit rows.
+
+Preserve old-memory isolation across append-only runs with irreversible call-id hashes only, so a delayed result cannot re-enter current evidence. Accumulate the transport denominator per source so an old unaccounted record survives an unchanged run. Keep project routing stable with an irreversible source/session identity map whose persisted label/path context is sanitized; never persist the raw private working directory for that purpose.
 
 ### 2. Rebuild each real project chain
 
@@ -42,13 +46,21 @@ Read every retained event in the chosen chain in source order. While reading, ma
 
 Write a narrative project history from those fields. It should be detailed enough that another Agent can continue without reopening every transcript, yet each important claim should retain event ids. Do not replace the history with a source index, feature list, or one-paragraph success summary.
 
-Start with `review-init`. It hashes the full retained event set and each proposed project chain. A review remains valid only for those exact hashes. Mark every chain `reviewed` or `reviewed-no-knowledge`; silence is not review. If an incremental run changes a chain, use `audit/impact-report.json` to reopen that chain instead of silently carrying its old conclusions forward.
+Start with `review-init`. Review version 3 hashes the complete canonical unified-event records for the full retained set and each project, while a separate hash fixes ordered event ids. A review remains valid only for those exact count/hash pairs. Mark every chain `reviewed` or `reviewed-no-knowledge`; silence is not review.
+
+On an incremental run, use `review-init --from-review PRIOR_REVIEW.json`. It carries only full-semantic-hash-identical reviewed projects, their reading receipts, and evidence records whose cited events remain valid. Reopen every changed chain listed in `audit/impact-report.json`. After any carry-forward, complete `cross_project_recheck`: revisit links, conflicts, repeated-context claims, global scopes, and evolved rules across unchanged and changed projects. Hash identity prevents unnecessary rereading; it does not prove cross-project meaning.
 
 ### 3. Derive cross-project knowledge
 
 Only after project histories are stable should you update evidence rules, identity/current direction, and collaboration/expression rules. Cross-project knowledge must be supported by dated direct statements or repeated contextual choices. A single short instruction, imported prompt, role-play, or third-party article is not a stable preference or identity.
 
-Represent each promoted assertion as a claim record: claim id, subject, statement, status, confidence, observed date, applicability, evidence event ids, conflicts, and superseded claims. Keep disputed, retracted, and stale claims in the audit instead of rewriting history into one smooth story. Run `validate-review` before `distill`; publication must fail closed when a claim points to missing, wrong-project, or insufficient-grade evidence.
+Before treating any serialized user-lane event as first-person evidence, resolve it through `actor_attributions`. `native_user` records the provider lane, not the primary person's identity. Use a project-lane or exact-event attribution with cited evidence; keep unresolved lanes as `unknown_user`.
+
+Represent each promoted assertion as a claim record: claim id, subject, statement, status, confidence, observed date, applicability, evidence event ids, conflicts, and superseded claims. Keep disputed, retracted, and stale claims in the audit instead of rewriting history into one smooth story.
+
+Record concrete feedback separately in `feedback_signals`. A correction, praise, gap, or outcome keeps its object and actual scope. If it motivates a future rule, create a versioned `rule_evolutions` candidate. Explicit approval may activate a bounded confirmed claim; repeated primary-user evidence from at least two project chains may establish a `repeated-context` claim without pretending it was explicitly approved. Only a later passed behavior check with primary-user or observable grade-B evidence can move an evolution to `validated`; only then call it evolved. Read [evolution-contract.md](evolution-contract.md).
+
+Run `validate-review` before `distill`; publication must fail closed when a claim, attribution, feedback record, evolution, completion state, or relationship points to missing, wrong-project, or insufficient evidence.
 
 ### 4. Relink by intent and evidence
 
@@ -63,7 +75,7 @@ Publishing materializes one graph edge and reciprocal Markdown navigation for ea
 - Remove binary and known runtime noise before semantic reading, but retain a hash/length or exclusion audit.
 - Deduplicate exact and semantic replays before counting patterns. Approval transcripts and imported history must not amplify a statement.
 - Route by project first. Read one complete chain at a time instead of loading the whole corpus into one context.
-- If a chain exceeds one context or tool response, read consecutive non-overlapping ranges. Checkpoint the next event index, boundary event ids, cumulative count, and packet hash; resume from that exact boundary rather than resummarizing the beginning. A truncated response never satisfies complete-chain attestation.
+- For every chain, copy each `review-packet` `receipt` into the project's `reading_receipts`. If a chain exceeds one context or tool response, call `review-packet --start-event N --max-events K` for consecutive non-overlapping ranges. Resume from `range.next_start_event`; verify the boundary event ids, accumulate `returned_event_count`, and compare both ordered-id and full semantic event-set hashes. Receipts must cover `0..event_count` without gaps or overlap. A truncated response never satisfies complete-chain attestation.
 - Prioritize corrections, errors, state transitions, patches, tests, browser/device observations, and deliveries when constructing the project state sheet. Still read the surrounding messages so the priority signal does not become a context-free conclusion.
 - For concrete feedback, preserve the rejected form and accepted replacement as `before` and `after`, plus the scope where the lesson applies. This is more reusable and less hallucinatory than turning one correction into a universal personality rule.
 - Store the detailed project history once. Later tasks retrieve only evidence rules, the relevant base rule set, and one to three matching projects.
@@ -73,7 +85,7 @@ Publishing materializes one graph edge and reciprocal Markdown navigation for ea
 
 ### Identity and ownership
 
-Promote an identity fact only when the speaker is confidently the primary user and the statement is about the user rather than a client, subagent, test role, quoted source, or requested persona. Preserve date and context. Project participation does not automatically prove job title, authorship, or ownership.
+Promote an identity fact only when the speaker has a valid semantic attribution to the primary user and the statement is about that person rather than a client, subagent, test role, quoted source, or requested persona. Preserve date and context. A native user lane and project participation do not automatically prove job title, authorship, or ownership.
 
 ### Preference and collaboration rule
 
@@ -99,4 +111,6 @@ Before handoff, sample every promoted identity fact and collaboration rule back 
 
 If evidence is missing, write the uncertainty. An explicit unresolved item is a successful reconstruction outcome; a plausible invented bridge is not.
 
-After the audit passes, publish with `distill`. Then exercise the normal reader with `query` and confirm that an unrelated task returns `no_match`; retrieval precision is part of the knowledge contract, not an optional convenience.
+After the audit passes, publish with `distill`. Then run `verify-retrieval` with a related task that must match and an unrelated task that must return `no_match`. Query and verification must load the graph selected by the published index, verify graph status/run id and exact document allowlist equality, and reject every archive path. Do not register or invoke the companion Reader as maintained knowledge until both machine gates pass. Retrieval precision and graph containment are part of the completion contract, not optional conveniences.
+
+During a later distillation, compare current project paths with `audit/published-files.json`. Archive prior generated project documents absent from the current reviewed set under `knowledge/archive/<run-id>/`, record the move in `audit/stale-project-documents.json`, and exclude the archive from current indexed retrieval. This preserves history without leaving renamed or removed dossiers looking current.

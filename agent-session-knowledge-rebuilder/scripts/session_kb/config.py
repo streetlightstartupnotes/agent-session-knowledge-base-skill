@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .model import SourceFile
+from .locking import file_mutation_lock
+from .verification import publication_manifest
 
 
 REGISTRY_VERSION = 1
@@ -60,15 +62,45 @@ def output_guidance(name: str, cwd: Path | None = None) -> dict[str, Any]:
         or _contains(local_skills_root, project_local)
     )
     return {
-        "guide_version": 1,
+        "guide_version": 2,
         "platform": platform_family(),
-        "question": "Where should the generated knowledge base be stored? Confirm one path before rebuild writes anything.",
+        "question": (
+            "Where should the generated knowledge base be stored? Confirm one path before rebuild writes anything, "
+            "then confirm that its sync, sharing, backup, access, and encryption exposure is acceptable for private transcript-derived data."
+        ),
+        "selection_rule": "Use only the path explicitly confirmed by the user; a suggested path is never assumed to be private or approved.",
+        "privacy_confirmation": {
+            "required": True,
+            "prompt": "Before writing, ask the user to confirm each applicable storage risk for the selected path.",
+            "checks": [
+                {
+                    "id": "cloud-sync",
+                    "question": "Is this directory synchronized to a cloud account, and is that acceptable for the knowledge base?",
+                },
+                {
+                    "id": "sharing",
+                    "question": "Can another user, workspace member, repository, or shared folder read this directory?",
+                },
+                {
+                    "id": "backup-retention",
+                    "question": "Will backups retain deleted or superseded private material, and is that retention acceptable?",
+                },
+                {
+                    "id": "encryption-and-access",
+                    "question": "Are device or disk encryption and local file permissions appropriate for the sensitivity of the source sessions?",
+                },
+            ],
+            "on_uncertainty": "Do not write yet; choose a dedicated local or encrypted private directory and confirm it explicitly.",
+        },
         "options": [
             {
                 "id": "personal",
                 "recommended": True,
                 "path": str(personal),
-                "tradeoff": "Easy to reuse across projects; keep it outside every Agent session root and outside a public repository.",
+                "tradeoff": (
+                    "Easy to reuse across projects; keep it outside every Agent session root and public repository, and verify whether the "
+                    "Documents directory is cloud-synced, shared, or retained by backups before confirming it."
+                ),
             },
             {
                 "id": "project-local",
@@ -85,7 +117,10 @@ def output_guidance(name: str, cwd: Path | None = None) -> dict[str, Any]:
                 "id": "custom",
                 "recommended": False,
                 "path": None,
-                "tradeoff": "Use an explicit absolute path on a writable disk or encrypted/private workspace.",
+                "tradeoff": (
+                    "Use an explicit absolute path on a writable disk or encrypted/private workspace; confirm its account access, sync, "
+                    "sharing, and backup behavior."
+                ),
             },
         ],
         "follow_up": "After publication, ask whether to register this path for $agent-knowledge-reader. Registration is a separate local write.",
@@ -176,16 +211,31 @@ def register_knowledge_base(name: str, kb: Path, registry_path: Path | None = No
     index = json.loads(index_path.read_text(encoding="utf-8"))
     if index.get("semantic_status") != "published":
         raise ValueError("only a reviewed, published knowledge base can be registered")
+    completion_path = root / "audit" / "completion-report.json"
+    if not completion_path.is_file():
+        raise ValueError("completion-report.json not found; run retrieval verification before registration")
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    gates = completion.get("gates") if isinstance(completion.get("gates"), dict) else {}
+    if completion.get("run_id") != index.get("run_id"):
+        raise ValueError("completion report and knowledge index belong to different evidence runs")
+    if completion.get("status") not in {"complete", "complete_with_unsupported_formats"}:
+        raise ValueError("knowledge base is not finally verified; run verify-retrieval before registration")
+    if gates.get("published_knowledge") is not True or gates.get("retrieval_related_match") is not True or gates.get("retrieval_unrelated_no_match") is not True:
+        raise ValueError("publication or retrieval verification gates are incomplete")
+    expected_manifest = str(completion.get("publication_manifest_sha256") or "")
+    if not expected_manifest or publication_manifest(root, index)["sha256"] != expected_manifest:
+        raise ValueError("published knowledge files do not match the verified publication manifest")
     target = (registry_path or default_registry_path()).expanduser()
-    registry = load_registry(target)
-    registry["knowledge_bases"][safe_name] = {
-        "path": str(root),
-        "registered_at": datetime.now(timezone.utc).isoformat(),
-        "run_id": index.get("run_id"),
-    }
-    if make_default or not registry.get("default"):
-        registry["default"] = safe_name
-    _atomic_json(target, registry)
+    with file_mutation_lock(target, "register-kb"):
+        registry = load_registry(target)
+        registry["knowledge_bases"][safe_name] = {
+            "path": str(root),
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": index.get("run_id"),
+        }
+        if make_default or not registry.get("default"):
+            registry["default"] = safe_name
+        _atomic_json(target, registry)
     return {"status": "registered", "name": safe_name, "kb": str(root), "registry": str(target), "default": registry.get("default")}
 
 

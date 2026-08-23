@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -11,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "agent-session-knowledge-rebuilder" / "scripts"))
 
 from session_kb.query import query_knowledge  # noqa: E402
+from session_kb.sanitize import Sanitizer  # noqa: E402
 
 REQUIRED_EVENT_FIELDS = {
     "schema_version",
@@ -43,25 +43,6 @@ E2E_CASES = {
     "e2e-codex": {"adapters": {"codex-jsonl"}},
     "e2e-clacky": {"adapters": {"clacky-json", "clacky-chunk"}},
 }
-SENSITIVE_PATTERNS = {
-    "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    "openai_key": re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
-    "bearer": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}"),
-    "cookie": re.compile(r"(?i)\b(?:Cookie|Set-Cookie)\s*:\s*[^\r\n]{3,}"),
-    "assigned_secret": re.compile(r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret)\b\s*[:=]\s*['\"]?[^\s,'\";}\]]{4,}"),
-    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{12,}\b"),
-    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b"),
-    "aws_key": re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
-    "email": re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.])", re.IGNORECASE),
-    "phone_cn": re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    "phone_international": re.compile(r"(?<![\w\d])\+[1-9]\d(?:[\s().-]*\d){7,13}(?!\d)"),
-    "private_ip": re.compile(r"\b(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})\b"),
-    "home_path": re.compile(r"/(?:Users|home)/[^/\s\"']+"),
-    "raw_base64": re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{4096,}={0,2}(?![A-Za-z0-9+/])"),
-}
-
-
 def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -163,6 +144,10 @@ def main() -> int:
             root / "audit" / "relationships.json",
             root / "audit" / "relationship-candidates.json",
             root / "audit" / "link-audit.json",
+            root / "audit" / "actor-attributions.json",
+            root / "audit" / "feedback-signals.json",
+            root / "audit" / "rule-evolutions.json",
+            root / "audit" / "retrieval-verification.json",
             root / "knowledge" / "knowledge-index.json",
             root / "knowledge" / "knowledge-graph.json",
             root / "review" / "review.json",
@@ -180,7 +165,13 @@ def main() -> int:
             failures.append({"case": name, "check": "adapter_counts", "expected": sorted(expectation["adapters"]), "actual": sorted(stats.get("adapter_counts") or {})})
         if completion.get("status") != "complete" or index.get("semantic_status") != "published":
             failures.append({"case": name, "check": "publication_gate", "completion": completion.get("status"), "index": index.get("semantic_status")})
-        for gate in ("semantic_review_complete", "knowledge_graph_complete", "published_knowledge"):
+        for gate in (
+            "semantic_review_complete",
+            "knowledge_graph_complete",
+            "published_knowledge",
+            "retrieval_related_match",
+            "retrieval_unrelated_no_match",
+        ):
             if completion.get("gates", {}).get(gate) is not True:
                 failures.append({"case": name, "check": "semantic_gate", "gate": gate})
         if len(events) != len(semantic):
@@ -201,20 +192,34 @@ def main() -> int:
         if not path.is_file() or path == report_path:
             continue
         scanned_files += 1
-        text = path.read_text(encoding="utf-8", errors="replace")
-        # Cryptographic hashes can contain an accidental 11-digit run; they are
-        # evidence identifiers, not phone numbers.
-        scan_text = re.sub(r"(?i)\b[0-9a-f]{24,}\b", "[HASH]", text)
-        for label, pattern in SENSITIVE_PATTERNS.items():
-            if pattern.search(scan_text):
-                failures.append({"case": "all", "check": "sensitive_scan", "kind": label, "path": _display(path, output_root)})
+        data = path.read_bytes()
+        if b"\x00" in data:
+            failures.append({"case": "all", "check": "binary_scan", "path": _display(path, output_root)})
+            continue
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            failures.append({"case": "all", "check": "binary_scan", "path": _display(path, output_root)})
+            continue
+        sanitizer = Sanitizer()
+        if sanitizer.sanitize_text(text) != text:
+            failures.append(
+                {
+                    "case": "all",
+                    "check": "sensitive_scan",
+                    "kind": "sanitizer_would_change_artifact",
+                    "path": _display(path, output_root),
+                }
+            )
 
     report = {
         "report_version": 3,
         "status": "passed" if not failures else "failed",
         "cases": case_reports,
         "artifact_files_scanned": scanned_files,
-        "sensitive_and_binary_scan": "passed" if not any(item["check"] == "sensitive_scan" for item in failures) else "failed",
+        "sensitive_and_binary_scan": (
+            "passed" if not any(item["check"] in {"sensitive_scan", "binary_scan"} for item in failures) else "failed"
+        ),
         "failures": failures,
     }
     output_root.mkdir(parents=True, exist_ok=True)

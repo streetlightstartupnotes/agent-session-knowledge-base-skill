@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Session Knowledge Base"
-  short_description: "Review and rebuild evidence-bound Agent knowledge"
-  default_prompt: "Use $agent-session-knowledge-rebuilder to complete an evidence-bound rebuild of my accessible Agent sessions, asking for a private output path and stopping rather than guessing when coverage, grouping, privacy, or compatibility is unresolved."
+  short_description: "Rebuild evidence-bound knowledge from Agent sessions"
+  default_prompt: "Use $agent-session-knowledge-rebuilder to inventory my accessible sessions read-only, ask where to store private knowledge, distill complete evidence chains, validate links and rule evolution, and finish only after positive and negative retrieval gates pass."

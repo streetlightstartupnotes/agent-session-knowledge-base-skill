@@ -31,6 +31,8 @@ SKIP_PARTS = {
     "documentation",
 }
 SNAPSHOT_BOUNDARY_BYTES = 65536
+SNAPSHOT_VERSION = 2
+HASH_CHUNK_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -167,13 +169,13 @@ def discover(
                 head = _read_head(path)
                 stat = path.stat()
             except OSError as exc:
-                result.errors.append({"path": display_path(path), "error": "source_read_error", "detail": str(exc)})
+                result.errors.append({"path": display_path(path), "error": "source_read_error", "detail_type": type(exc).__name__})
                 continue
             if forced_adapter:
                 try:
                     adapter = registry.get(forced_adapter)
                 except ValueError as exc:
-                    result.errors.append({"path": display_path(path), "error": "unknown_forced_adapter", "detail": str(exc)})
+                    result.errors.append({"path": display_path(path), "error": "unknown_forced_adapter", "detail_type": type(exc).__name__})
                     continue
                 score, reason = adapter.probe(path, head)
                 audit = [{"adapter": adapter.name, "score": score, "reason": reason}]
@@ -229,6 +231,19 @@ def discover(
     return result
 
 
+def _hash_exact_prefix(path: Path, size: int) -> str:
+    digest = sha256()
+    remaining = size
+    with path.open("rb") as handle:
+        while remaining:
+            chunk = handle.read(min(HASH_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise OSError("source became shorter while freezing")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+
+
 def freeze_sources(sources: list[SourceFile]) -> dict[str, Any]:
     frozen: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -236,7 +251,7 @@ def freeze_sources(sources: list[SourceFile]) -> dict[str, Any]:
         try:
             stat = source.path.stat()
         except OSError as exc:
-            errors.append({"path": display_path(source.path), "error": "freeze_stat_error", "detail": str(exc)})
+            errors.append({"path": display_path(source.path), "error": "freeze_stat_error", "detail_type": type(exc).__name__})
             continue
         source.frozen_size = stat.st_size
         source.mtime_ns = stat.st_mtime_ns
@@ -250,6 +265,14 @@ def freeze_sources(sources: list[SourceFile]) -> dict[str, Any]:
                 head = handle.read(head_length)
                 handle.seek(tail_start)
                 tail = handle.read(tail_length)
+            frozen_sha256 = _hash_exact_prefix(source.path, stat.st_size)
+            after = source.path.stat()
+            if (
+                after.st_size != stat.st_size
+                or after.st_mtime_ns != stat.st_mtime_ns
+                or (getattr(stat, "st_ino", 0) and getattr(after, "st_ino", 0) != getattr(stat, "st_ino", 0))
+            ):
+                raise OSError("source changed while freezing")
             item.update(
                 {
                     "head_length": head_length,
@@ -257,19 +280,47 @@ def freeze_sources(sources: list[SourceFile]) -> dict[str, Any]:
                     "tail_start": tail_start,
                     "tail_length": tail_length,
                     "tail_sha256": sha256(tail).hexdigest(),
+                    "frozen_sha256": frozen_sha256,
                 }
             )
         except OSError as exc:
-            errors.append({"path": display_path(source.path), "error": "freeze_hash_error", "detail": str(exc)})
+            errors.append({"path": display_path(source.path), "error": "freeze_hash_error", "detail_type": type(exc).__name__})
             continue
         frozen.append(item)
     return {
-        "snapshot_version": 1,
+        "snapshot_version": SNAPSHOT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "requested_source_count": len(sources),
         "source_count": len(frozen),
         "sources": frozen,
         "errors": errors,
+        "complete": not errors and len(frozen) == len(sources),
     }
+
+
+def validate_snapshot(value: dict[str, Any], sources: list[SourceFile] | None = None) -> None:
+    if not isinstance(value, dict) or value.get("snapshot_version") != SNAPSHOT_VERSION:
+        raise ValueError("invalid or legacy snapshot; create a fresh version-2 snapshot")
+    rows = value.get("sources")
+    if not isinstance(rows, list):
+        raise ValueError("invalid snapshot: expected a sources list")
+    source_count = int(value.get("source_count", -1))
+    requested_count = int(value.get("requested_source_count", -1))
+    if value.get("errors") or value.get("complete") is not True or source_count != len(rows) or requested_count != source_count:
+        raise ValueError("snapshot is incomplete and cannot be consumed")
+    ids: set[str] = set()
+    for item in rows:
+        if not isinstance(item, dict) or not item.get("source_file_id") or not item.get("frozen_sha256"):
+            raise ValueError("snapshot source is missing an identity or full frozen digest")
+        source_id = str(item["source_file_id"])
+        if source_id in ids:
+            raise ValueError("snapshot contains a duplicate source identity")
+        ids.add(source_id)
+    discovery = value.get("discovery")
+    if isinstance(discovery, dict) and int(discovery.get("supported_files", -1)) != requested_count:
+        raise ValueError("snapshot source count does not match its discovery denominator")
+    if sources is not None and ids != {source.source_file_id for source in sources}:
+        raise ValueError("snapshot source identities do not match the requested rebuild sources")
 
 
 def source_from_snapshot(item: dict[str, Any]) -> SourceFile:
@@ -297,6 +348,7 @@ def source_from_snapshot(item: dict[str, Any]) -> SourceFile:
 
 def load_snapshot(path: Path) -> tuple[dict[str, Any], list[SourceFile]]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
-        raise ValueError("invalid snapshot: expected object with sources")
-    return value, [source_from_snapshot(item) for item in value["sources"]]
+    validate_snapshot(value)
+    sources = [source_from_snapshot(item) for item in value["sources"]]
+    validate_snapshot(value, sources)
+    return value, sources

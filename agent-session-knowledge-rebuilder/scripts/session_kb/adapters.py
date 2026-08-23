@@ -269,7 +269,7 @@ class CodexJSONLAdapter(SessionAdapter):
                         "message",
                         payload.get("message") or payload.get("content"),
                         timestamp=timestamp,
-                        actor_hint="primary_user",
+                        actor_hint="native_user",
                         metadata={"transport_lane": "codex-event-message"},
                     )
                 elif event_name == "agent_message":
@@ -345,7 +345,7 @@ class ClackyJSONAdapter(SessionAdapter):
         try:
             record = json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            result.errors.append({"record_locator": "document", "error": "json_decode_error", "detail": str(exc)})
+            result.errors.append({"record_locator": "document", "error": "json_decode_error", "detail_type": type(exc).__name__})
             return result
         if not isinstance(record, dict) or not isinstance(record.get("messages"), list):
             result.errors.append({"record_locator": "document", "error": "not_clacky_session"})
@@ -391,7 +391,7 @@ class ClackyJSONAdapter(SessionAdapter):
                         working_dir=working_dir,
                         project_id=project_id,
                         session_title=title,
-                        actor_hint=("subagent" if delegated_profile else "primary_user") if role == "user" else None,
+                        actor_hint=("subagent" if delegated_profile else "native_user") if role == "user" else None,
                         flags=["subagent"] if delegated_profile else [],
                         metadata={"transport_lane": "clacky-json"},
                     )
@@ -572,7 +572,7 @@ class ClaudeCodeJSONLAdapter(SessionAdapter):
                     block_locator = f"{locator}.content[{block_index}]"
                     if isinstance(block, str):
                         sequence += 1
-                        result.events.append(RawEvent(session_id, sequence, block_locator, role, "message", block, timestamp, parent_session_id, "subagent" if sidechain else ("primary_user" if role == "user" else None), flags=flags, working_dir=working_dir, session_title=title, metadata={"transport_lane": "claude-code"}))
+                        result.events.append(RawEvent(session_id, sequence, block_locator, role, "message", block, timestamp, parent_session_id, "subagent" if sidechain else ("native_user" if role == "user" else None), flags=flags, working_dir=working_dir, session_title=title, metadata={"transport_lane": "claude-code"}))
                         continue
                     if not isinstance(block, dict):
                         continue
@@ -581,7 +581,7 @@ class ClaudeCodeJSONLAdapter(SessionAdapter):
                         result.excluded.append({"record_locator": block_locator, "reason": "hidden_reasoning"})
                     elif block_type == "text":
                         sequence += 1
-                        result.events.append(RawEvent(session_id, sequence, block_locator, role, "message", _block_text(block), timestamp, parent_session_id, "subagent" if sidechain else ("primary_user" if role == "user" else None), flags=flags, working_dir=working_dir, session_title=title, metadata={"transport_lane": "claude-code"}))
+                        result.events.append(RawEvent(session_id, sequence, block_locator, role, "message", _block_text(block), timestamp, parent_session_id, "subagent" if sidechain else ("native_user" if role == "user" else None), flags=flags, working_dir=working_dir, session_title=title, metadata={"transport_lane": "claude-code"}))
                     elif block_type == "tool_use":
                         sequence += 1
                         name = block.get("name") or "tool"
@@ -649,7 +649,7 @@ class WorkBuddyJSONLAdapter(SessionAdapter):
                 text = "\n".join(_block_text(block) for block in blocks if _block_text(block))
                 if text:
                     sequence += 1
-                    result.events.append(RawEvent(session_id, sequence, locator, role, "message", text, timestamp, actor_hint="primary_user" if role == "user" else None, working_dir=working_dir, session_title=title, metadata={"transport_lane": "workbuddy"}))
+                    result.events.append(RawEvent(session_id, sequence, locator, role, "message", text, timestamp, actor_hint="native_user" if role == "user" else None, working_dir=working_dir, session_title=title, metadata={"transport_lane": "workbuddy"}))
             elif record_type == "function_call":
                 sequence += 1
                 name = record.get("name") or "tool"
@@ -762,7 +762,7 @@ class CursorAgentJSONLAdapter(SessionAdapter):
                                 role,
                                 "message",
                                 block,
-                                actor_hint="primary_user" if role == "user" else None,
+                                actor_hint="native_user" if role == "user" else None,
                                 metadata={"transport_lane": "cursor-agent-transcript"},
                             )
                         )
@@ -783,7 +783,7 @@ class CursorAgentJSONLAdapter(SessionAdapter):
                                     role,
                                     "message",
                                     text,
-                                    actor_hint="primary_user" if role == "user" else None,
+                                    actor_hint="native_user" if role == "user" else None,
                                     metadata={"transport_lane": "cursor-agent-transcript"},
                                 )
                             )
@@ -829,7 +829,7 @@ class CursorAgentJSONLAdapter(SessionAdapter):
                                 role,
                                 "attachment",
                                 _json_text(_safe_subset(block, ("type", "name", "mime_type", "size", "source"))),
-                                actor_hint="primary_user" if role == "user" else None,
+                                actor_hint="native_user" if role == "user" else None,
                                 metadata={"transport_lane": "cursor-agent-transcript"},
                             )
                         )

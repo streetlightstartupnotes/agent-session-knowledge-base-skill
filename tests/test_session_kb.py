@@ -24,6 +24,7 @@ from session_kb.pipeline import build_knowledge_base  # noqa: E402
 from session_kb.query import query_knowledge  # noqa: E402
 from session_kb.release import release_check  # noqa: E402
 from session_kb.review import create_review_packet, create_review_template, distill_review, validate_review  # noqa: E402
+from session_kb.verification import verify_retrieval  # noqa: E402
 
 
 READER_PATH = PROJECT_ROOT / "agent-knowledge-reader" / "scripts" / "read_knowledge.py"
@@ -442,13 +443,14 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         )
         output, _, _ = self._build(fixture)
         identity = (output / "knowledge" / "01-identity-and-current-direction.md").read_text(encoding="utf-8")
-        self.assertIn("product designer", identity)
+        self.assertNotIn("product designer", identity)
+        self.assertIn("No safely isolated identity", identity)
         self.assertNotIn("client banker", identity)
         self.assertNotIn("test doctor", identity)
         self.assertNotIn("customer lawyer", identity)
         events = read_jsonl(output / "audit" / "events.jsonl")
         actor_by_fragment = {fragment: next(event["actor_kind"] for event in events if fragment in event["content"]) for fragment in ("product designer", "test doctor", "customer lawyer")}
-        self.assertEqual(actor_by_fragment["product designer"], "primary_user")
+        self.assertEqual(actor_by_fragment["product designer"], "native_user")
         self.assertEqual(actor_by_fragment["test doctor"], "test_actor")
         self.assertEqual(actor_by_fragment["customer lawyer"], "subagent")
         self.assertFalse(any("client banker" in event["content"] for event in events))
@@ -460,7 +462,7 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         email = "private" + "@example.com"
         phone = "138" + "0013" + "8000"
         assigned_value = "pass" + "word=" + "HiddenValue42"
-        cookie = "Cook" + "ie: session=abc123456789"
+        header_value = "Cook" + "ie: session=abc123456789"
         slack = "xoxb-" + "A" * 24
         private_ip = ".".join(("192", "168", "23", "42"))
         binary = base64.b64encode(b"\x89PNG" + b"x" * 5000).decode("ascii")
@@ -471,7 +473,7 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
                 {
                     "session_id": "privacy-1",
                     "messages": [
-                        {"role": "user", "content": f"{token} {email} {phone} {assigned_value} {cookie} {slack} {private_ip} {Path.home()}/private/file"},
+                        {"role": "user", "content": f"{token} {email} {phone} {assigned_value} {header_value} {slack} {private_ip} {Path.home()}/private/file"},
                         {"role": "assistant", "content": binary},
                     ],
                 }
@@ -505,8 +507,11 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         with source.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(codex_message("assistant", "Second incremental message.")) + "\n")
         _, _, second = self._build(fixture, output=output, incremental=True)
-        self.assertLess(second["stats"]["bytes_read"], source.stat().st_size)
-        self.assertLess(second["stats"]["incremental_bytes_read"], first_size)
+        self.assertLess(second["stats"]["incremental_bytes_parsed"], first_size)
+        self.assertEqual(second["stats"]["append_verification_bytes_read"], first_size)
+        self.assertEqual(second["stats"]["parsed_prefix_integrity_bytes_read"], first_size)
+        self.assertEqual(second["stats"]["incremental_integrity_bytes_read"], 2 * first_size)
+        self.assertEqual(second["stats"]["incremental_bytes_read"], source.stat().st_size + first_size)
         events = read_jsonl(output / "audit" / "events.jsonl")
         self.assertEqual(sum("incremental message" in event["content"] for event in events), 2)
         snapshots = list((output / "audit" / "snapshots").glob("*.json"))
@@ -617,9 +622,16 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         for project in review["projects"]:
             project_events = [event for event in events if event["project_key"] == project["project_key"]]
             project["semantic_status"] = "reviewed"
+            project["reading_receipts"] = [create_review_packet(output, project["project_key"])["receipt"]]
             project["link_analysis"] = {
                 "status": "intentional-isolate",
                 "rationale": "Only one reviewed project chain exists in this fixture.",
+            }
+            project["completion"] = {
+                "level": "requested",
+                "status": "unverified",
+                "evidence_event_ids": [project_events[0]["event_id"]],
+                "rationale": "The user request is observed; stronger layers remain represented separately in the history.",
             }
             project["history"]["objective"] = [
                 {
@@ -639,7 +651,14 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         _, _, review_errors = validate_review(output, review_path)
         self.assertEqual(review_errors, [])
         distilled = distill_review(output, review_path)
-        self.assertEqual(distilled["status"], "complete")
+        self.assertEqual(distilled["status"], "needs_retrieval_verification")
+        verification = verify_retrieval(
+            output,
+            "continue the portfolio interface",
+            "unrelated quantum botany archive",
+            review["projects"][0]["project_key"],
+        )
+        self.assertEqual(verification["status"], "passed")
         query = query_knowledge(output, "continue the portfolio interface", max_projects=1)
         self.assertEqual(query["documents"][0]["type"], "evidence")
         self.assertEqual(sum(item["type"] == "project" for item in query["documents"]), 1)
@@ -785,7 +804,7 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
         _, _, errors = validate_review(output, review_path)
         self.assertTrue(any("semantic_status" in error for error in errors))
-        self.assertTrue(any("grade-A" in error for error in errors))
+        self.assertTrue(any("primary-user evidence" in error for error in errors))
 
     def test_evidence_bound_relationships_publish_reciprocal_links_and_expand_queries(self) -> None:
         fixture = self.root / "relationships"
@@ -825,19 +844,26 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         self.assertNotIn("dashboard draft", json.dumps(packet, ensure_ascii=False))
         for title, project in projects_by_title.items():
             project_events = events_by_key[project["project_key"]]
-            user_event = next(event for event in project_events if event["actor_kind"] == "primary_user")
+            user_event = next(event for event in project_events if event["role"] == "user")
             project["semantic_status"] = "reviewed"
+            project["reading_receipts"] = [create_review_packet(output, project["project_key"])["receipt"]]
             project["link_analysis"] = {
                 "status": "linked",
                 "rationale": "The user explicitly connects the shared artifact and continuation across both project chains.",
+            }
+            project["completion"] = {
+                "level": "requested",
+                "status": "unverified",
+                "evidence_event_ids": [user_event["event_id"]],
+                "rationale": "The request is directly observed; the fixture does not promote a stronger completion layer.",
             }
             project["history"]["objective"] = [
                 {"text": user_event["content"], "evidence_event_ids": [user_event["event_id"]], "status": "observed"}
             ]
         origin = projects_by_title["origin"]
         dashboard = projects_by_title["dashboard"]
-        origin_user = next(event for event in events_by_key[origin["project_key"]] if event["actor_kind"] == "primary_user")
-        dashboard_user = next(event for event in events_by_key[dashboard["project_key"]] if event["actor_kind"] == "primary_user")
+        origin_user = next(event for event in events_by_key[origin["project_key"]] if event["role"] == "user")
+        dashboard_user = next(event for event in events_by_key[dashboard["project_key"]] if event["role"] == "user")
         relationship = {
             "relationship_id": "rel-origin-dashboard",
             "source_project_key": origin["project_key"],
@@ -897,7 +923,14 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         event = read_jsonl(output / "audit" / "events.jsonl")[0]
         project = review["projects"][0]
         project["semantic_status"] = "reviewed"
+        project["reading_receipts"] = [create_review_packet(output, project["project_key"])["receipt"]]
         project["link_analysis"] = {"status": "intentional-isolate", "rationale": "No evidence in the frozen records connects this experiment to another reviewed chain."}
+        project["completion"] = {
+            "level": "requested",
+            "status": "unverified",
+            "evidence_event_ids": [event["event_id"]],
+            "rationale": "The standalone request is observed and no stronger completion is claimed.",
+        }
         project["history"]["objective"] = [{"text": event["content"], "evidence_event_ids": [event["event_id"]], "status": "observed"}]
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
         distill_review(output, review_path)
