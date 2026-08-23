@@ -20,7 +20,7 @@ import session_kb.pipeline as pipeline_module  # noqa: E402
 from session_kb.locking import lock_path, mutation_lock  # noqa: E402
 from session_kb.model import SourceFile  # noqa: E402
 from session_kb.review import create_review_packet, create_review_template, distill_review, validate_review  # noqa: E402
-from session_kb.verification import verify_retrieval  # noqa: E402
+from session_kb.verification import verify_retrieval, verify_retrieval_suite  # noqa: E402
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -435,7 +435,17 @@ class EvolutionAndIncrementalReviewTests(unittest.TestCase):
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
         distill_review(output, review_path)
         project_key = review["projects"][0]["project_key"]
-        verification = verify_retrieval(output, "stable publication project", "unrelated marine geology index", project_key)
+        verification = verify_retrieval_suite(
+            output,
+            {
+                "cases": [
+                    {"kind": "related", "task": "stable publication project", "expected_project_keys": [project_key]},
+                    {"kind": "related", "task": "continue the stable project", "expected_project_keys": [project_key]},
+                    {"kind": "hard_negative", "task": "unrelated marine geology index"},
+                    {"kind": "hard_negative", "task": "ceramic orchard forecast"},
+                ]
+            },
+        )
         self.assertEqual(verification["status"], "passed")
         index_before = (output / "knowledge" / "knowledge-index.json").read_bytes()
         completion_before = json.loads((output / "audit" / "completion-report.json").read_text(encoding="utf-8"))
@@ -647,7 +657,17 @@ class EvolutionAndIncrementalReviewTests(unittest.TestCase):
         distill_review(output, review_path)
         project_key = review["projects"][0]["project_key"]
         self.assertEqual(
-            verify_retrieval(output, "manifest integrity project", "unrelated deep ocean mineral", project_key)["status"],
+            verify_retrieval_suite(
+                output,
+                {
+                    "cases": [
+                        {"kind": "related", "task": "manifest integrity project", "expected_project_keys": [project_key]},
+                        {"kind": "related", "task": "continue manifest project", "expected_project_keys": [project_key]},
+                        {"kind": "hard_negative", "task": "unrelated deep ocean mineral"},
+                        {"kind": "hard_negative", "task": "ceramic orchard forecast"},
+                    ]
+                },
+            )["status"],
             "passed",
         )
         index = json.loads((output / "knowledge" / "knowledge-index.json").read_text(encoding="utf-8"))

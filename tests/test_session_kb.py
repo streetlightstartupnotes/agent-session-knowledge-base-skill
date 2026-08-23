@@ -24,7 +24,7 @@ from session_kb.pipeline import build_knowledge_base  # noqa: E402
 from session_kb.query import query_knowledge  # noqa: E402
 from session_kb.release import release_check  # noqa: E402
 from session_kb.review import create_review_packet, create_review_template, distill_review, validate_review  # noqa: E402
-from session_kb.verification import verify_retrieval  # noqa: E402
+from session_kb.verification import verify_retrieval, verify_retrieval_suite  # noqa: E402
 
 
 READER_PATH = PROJECT_ROOT / "agent-knowledge-reader" / "scripts" / "read_knowledge.py"
@@ -652,11 +652,17 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         self.assertEqual(review_errors, [])
         distilled = distill_review(output, review_path)
         self.assertEqual(distilled["status"], "needs_retrieval_verification")
-        verification = verify_retrieval(
+        project_key = review["projects"][0]["project_key"]
+        verification = verify_retrieval_suite(
             output,
-            "continue the portfolio interface",
-            "unrelated quantum botany archive",
-            review["projects"][0]["project_key"],
+            {
+                "cases": [
+                    {"kind": "related", "task": "continue the portfolio interface", "expected_project_keys": [project_key]},
+                    {"kind": "related", "task": "portfolio interface project", "expected_project_keys": [project_key]},
+                    {"kind": "hard_negative", "task": "unrelated quantum botany archive"},
+                    {"kind": "hard_negative", "task": "ceramic orchard forecast"},
+                ]
+            },
         )
         self.assertEqual(verification["status"], "passed")
         query = query_knowledge(output, "continue the portfolio interface", max_projects=1)

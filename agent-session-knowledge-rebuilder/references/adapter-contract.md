@@ -63,4 +63,18 @@ For this format-specific gate, end to end means discovery or explicit selection 
 
 If any step is absent, report `implemented-unverified`, `sample-missing`, or `unsupported` instead of `verified`.
 
+## Golden regression packs versus compatibility evidence
+
+The public repository contains one inline synthetic golden case for each declared adapter under `tests/fixtures/golden/v1/manifest.json`. Run it in isolation with:
+
+```text
+<python> scripts/session_kb.py golden-check \
+  --fixture-root tests/fixtures/golden/v1 \
+  --manifest tests/fixtures/golden/v1/manifest.json
+```
+
+Inline files are allowed only when the manifest declares `fixture_kind: public-synthetic`. They must be invented, privacy-safe, minimal format examples. The golden runner materializes them in a temporary directory, discovers/freezes/rebuilds each case, and checks exact adapter counts, minimum events, required event types, forbidden-text absence, clean parsing, transport accounting, zero unknown/unsupported candidates, zero coverage gaps, and zero discovery errors. A mixed valid-plus-unknown fixture therefore fails instead of hiding the unknown input behind a supported adapter. Its report always leaves `compatibility_claim_updated: false`.
+
+A real private sample uses a user-held fixture root outside the repository. Its manifest stays inside that private root and references a relative `source_root`; output stays in an isolated private or temporary directory. Do not inline, copy, hash-list, or commit the real transcript into the public pack. A real sample may support the format gate only when the separate exact-format smoke also reaches review-template hashing and the required adapter tests. Golden success alone cannot prove a new format, Agent host, vendor version, or operating system.
+
 Cross-platform code paths need automated path/root tests for Windows, macOS, and Linux. Real-sample validation on one operating system proves the format adapter, not every vendor version or operating-system integration. Record those boundaries in the compatibility matrix.

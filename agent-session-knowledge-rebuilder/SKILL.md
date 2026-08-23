@@ -1,40 +1,41 @@
 ---
 name: agent-session-knowledge-rebuilder
-description: Rebuild and incrementally maintain an auditable personal, project, and collaboration knowledge base from supported Agent session archives. Use for read-only session inventory, normalization, privacy cleanup, complete-chain semantic review, evidence-bound relinking, feedback-governed rule evolution, publication, or retrieval verification. Report unknown formats and validation boundaries instead of claiming universal compatibility.
+description: Rebuild and incrementally maintain an auditable personal, project, and collaboration knowledge base from supported Agent session archives. Use for read-only inventory, privacy-safe normalization, evidence-bound project regrouping, complete or chunk-reused semantic review, lifecycle changes, relinking, rule evolution, publication, and retrieval evaluation. Report unknown formats and validation boundaries instead of claiming universal compatibility.
 ---
 
 # Agent Session Knowledge Rebuilder
 
-Turn supported session archives into a private, maintainable knowledge base. Execute the workflow through machine-verified retrieval; do not stop after extraction or hand an empty review file to the user.
+Turn supported session archives into a private, maintainable knowledge base. Continue through semantic review and the v0.5 retrieval suite; deterministic extraction or an empty review template is not completion.
 
-The Python runtime performs deterministic discovery, parsing, sanitization, hashing, accounting, rendering, and validation. The Agent using this Skill performs semantic work: read every sanitized project chain, reconstruct intent and corrections, resolve actor identity, write evidence-bound histories, validate both endpoints of each relationship, and govern rule changes. Neither layer may impersonate the other.
+Python performs deterministic discovery, parsing, sanitization, hashing, accounting, lifecycle planning, rendering, and validation. The Agent performs semantic work: read the sanitized evidence, correct project membership, resolve actors, reconstruct intent and corrections, write evidence-bound histories, validate both endpoints of links, and govern lasting rules. Never describe one layer as having done the other's work.
 
-## Load the applicable contracts
+## Load only the applicable contracts
 
 Read [references/execution-contract.md](references/execution-contract.md) before inventory and final reporting.
 
-- Read [references/adapter-contract.md](references/adapter-contract.md) before adding or judging a format.
-- Read [references/distillation-method.md](references/distillation-method.md) and [references/review-contract.md](references/review-contract.md) before semantic review.
-- Read [references/evolution-contract.md](references/evolution-contract.md) when the evidence contains corrections, positive/negative feedback, gaps, outcomes, or proposed lasting rules.
+- Read [references/adapter-contract.md](references/adapter-contract.md) before adding, judging, or golden-testing a format.
+- Read [references/distillation-method.md](references/distillation-method.md) and [references/review-contract.md](references/review-contract.md) before project regrouping or semantic review.
+- Read [references/evolution-contract.md](references/evolution-contract.md) when evidence contains feedback or a proposed lasting behavior change.
+- Read [references/lifecycle-contract.md](references/lifecycle-contract.md) before retracting, forgetting, or scheduling revalidation.
 - Read [references/output-contract.md](references/output-contract.md) when consuming or changing generated artifacts.
-- Read [references/public-release.md](references/public-release.md) before packaging or publishing this Skill pack.
+- Read [references/public-release.md](references/public-release.md) before packaging or publishing the Skill pack.
 
 ## Non-negotiable boundaries
 
 - Keep source sessions read-only. Never delete, rewrite, move, repair, or upload them.
-- Inventory the accessible environment before claiming coverage. An installed app, adapter framework, readable session format, execution host, and operating-system validation are different facts.
-- Claim input support only for exact formats listed in [references/compatibility.md](references/compatibility.md). Report unknown candidates, ambiguous probes, unreadable locations, and bounded scan gaps.
-- Freeze source sizes and boundary hashes before parsing. Do not chase later files or re-ingest the rebuild's own logs.
-- Keep old-memory reads isolated across incremental boundaries. Never turn a delayed result from a prior memory-read call into current evidence.
-- Preserve visible user/Agent messages, tool calls/results, patches, browser/device events, errors, fallbacks, and observed delivery. Quarantine compacted summaries, runtime injection, old-memory reads, imported or nested transcripts, hidden reasoning, and delegated wrappers.
-- A native serialized `user` lane is provenance, not proof of the primary human. Resolve it semantically through `actor_attributions`; keep unknown users, customers, third parties, test actors, orchestrators, and subagents separate.
-- Strip binary bodies and redact standard/Base64URL payloads, MIME-wrapped blocks including short terminal lines, parameterized data URLs, compound or generic credential assignments, authorization headers, Cookie headers/assignments/jars, URI userinfo, private keys, contacts, non-global network addresses, and current or foreign-machine home paths from every generated artifact.
-- Do not infer identity, preference, causality, ownership, relationship, completion, or evolution from keywords or Agent claims. Published assertions require valid event ids and the applicable semantic gate.
-- Keep generated knowledge, audits, reviews, registry data, real sessions, and real-sample outputs outside the public Skill source tree.
+- Inventory the accessible environment before claiming coverage. Installed software, a supported source format, an execution host, and an operating system are separate compatibility facts.
+- Claim input support only for exact formats in [references/compatibility.md](references/compatibility.md). Preserve unknown candidates, ambiguous probes, unreadable roots, and scan gaps.
+- Freeze source sizes and full frozen-byte hashes before parsing. Do not chase files created after the freeze or re-ingest the rebuild's own logs.
+- Preserve visible messages, tool calls/results, patches, browser/device events, failures, fallbacks, and observed delivery. Quarantine summaries, runtime injection, old-memory reads, imported/nested transcripts, hidden reasoning, and delegated wrappers.
+- A serialized `user` lane is transport provenance, not proof of the primary human. Resolve it through evidence-bound `actor_attributions`; keep customers, third parties, test actors, orchestrators, and subagents separate.
+- Strip binary bodies and redact credentials, authorization/Cookie material, URI userinfo, private keys, contacts, non-global addresses, private home paths, and standard/Base64URL/MIME/data-URL payloads from generated artifacts.
+- Treat deterministic project keys as proposals. Never use a graph link to hide a false merge or split.
+- Do not infer identity, preference, causality, ownership, relationship, completion, or evolution from keywords or Agent claims. Published assertions need valid event evidence and the applicable semantic gate.
+- Keep generated knowledge, reviews, audits, registries, real sessions, private eval sets, lifecycle plans, and real-sample outputs outside the public Skill source tree.
 
-## Choose the launcher
+## Choose a launcher
 
-Use an available Python 3.9+ launcher appropriate to the current environment. In the commands below, replace `<python>` with that launcher. Only the standard library is required. If no suitable runtime exists, explain the prerequisite and stop; do not install or upgrade software without permission.
+Use an available Python 3.9+ launcher appropriate to the environment. Replace `<python>` below with it. Only the standard library is required. If it is unavailable, explain the prerequisite and stop; do not install or upgrade software without permission.
 
 ## 1. Inventory without writing
 
@@ -42,26 +43,26 @@ Use an available Python 3.9+ launcher appropriate to the current environment. In
 <python> scripts/session_kb.py inventory --json
 ```
 
-The scan is heuristic and bounded. Report separately:
+Report separately:
 
 1. installed or configured Agent candidates;
-2. supported session files by exact adapter;
+2. supported files grouped by exact adapter;
 3. unknown or ambiguous structural fingerprints;
-4. errors, unreadable roots, filters, and coverage gaps.
+4. unreadable roots, filters, errors, and coverage gaps.
 
-For an export or nonstandard location, repeat `--root PATH`. For a trusted exact file/root, use `--source ADAPTER=PATH`. Never turn “all candidates inside the reported search boundary were checked” into “every session everywhere was found.”
+For an export or nonstandard location, repeat `--root PATH`. For a trusted exact source, use `--source ADAPTER=PATH`. Never turn a bounded scan into “every session everywhere was found.”
 
 ## 2. Ask where private knowledge should be stored
 
-If the user did not supply an output path, run:
+If the user supplied no path, run:
 
 ```text
 <python> scripts/session_kb.py guide-output --name portable-name
 ```
 
-Show the choices and wait for the path decision. Do not choose the Skill repository, a public repository, a source-session root, the filesystem root, or the entire user directory. Explain that a cloud-synchronized location may upload private knowledge and preserve remote versions, while a shared location may expose it to other people or link holders. Confirm sync, sharing, backup retention, encryption, and file-access boundaries before writing there.
+Show the choices and wait for the path decision. Do not choose the Skill repository, a public repository, a source-session root, the filesystem root, or the entire user directory. Explain sync uploads, shared access, backup retention, device/disk encryption, and file-permission boundaries.
 
-Path approval authorizes only the private knowledge output and snapshot. It does not authorize registry writes, uploads, publication, source changes, or software installation.
+Path approval covers only the private output and snapshot. It does not authorize registration, upload, public release, source modification, software installation, or deletion elsewhere.
 
 ## 3. Freeze, dry-run, and rebuild
 
@@ -71,123 +72,154 @@ Path approval authorizes only the private knowledge output and snapshot. It does
 <python> scripts/session_kb.py rebuild --snapshot /approved/private/snapshot.json --output /approved/private/kb
 ```
 
-`freeze` creates snapshot version 2 with an exact `frozen_sha256` over every source's frozen bytes, plus the sampled boundaries and source denominator. If any source stat/hash fails, `freeze` writes no snapshot. A snapshot with errors, incomplete status, missing full digest, duplicate/mismatched source ids, or denominator mismatch is not consumable. Snapshot creation is exclusive and refuses an existing destination; use a new path instead of overwriting an old denominator.
+Snapshot version 2 binds every requested source's frozen bytes with `frozen_sha256`. Any stat/hash error, incomplete denominator, duplicate source identity, or missing digest blocks consumption. Snapshot creation is exclusive and never overwrites an old denominator.
 
-Inspect the completion report, statistics, deterministic dispositions, impact report, unsupported formats, coverage gaps, errors, exclusions, and compatibility matrix. The expected first state is `needs_semantic_review`; deterministic extraction is not a completed knowledge base.
+Inspect completion, statistics, dispositions, impact, unsupported formats, gaps, errors, exclusions, and compatibility output. The expected state is `needs_semantic_review`; extraction is not a completed knowledge base.
 
-CLI knowledge-base mutation commands use a fail-closed single-writer lock and atomic file replacement. If a lock already exists, do not start a second writer or delete it reflexively. Inspect the recorded operation, process, and time; verify that no writer remains before treating it as stale. Coordinate any manual review-file editing separately.
+Mutating commands use a fail-closed single-writer lock and atomic replacement. Inspect lock ownership before treating one as stale; never delete an active or ambiguous lock.
 
-For a later run, freeze again and add `--incremental`. For a verified append-only source, only bytes after the last complete offset are passed to the adapter parser, but the old prefix is still physically read for append integrity and the actual frozen-stream digest. Report `bytes_parsed`/`incremental_bytes_parsed` separately from `integrity_bytes_read`/`incremental_integrity_bytes_read`; never say the command physically reads only the tail.
+For later runs, freeze again and add `--incremental`. Only a verified append tail reaches the adapter parser, but the old prefix is still read for integrity and the actual-stream digest. Report parsed bytes separately from integrity bytes. A boundary or digest failure preserves prior verified source state. Recovery under a new consistent snapshot fully reparses and replaces that source's retained events and source-scoped audit rows.
 
-The digest computed over bytes actually read must equal snapshot v2 `frozen_sha256`. Reject middle rewrites, change-during-read, and ABA-style attempts that merely restore size, mtime, inode, or sampled head/tail appearance. If a frozen boundary or stream digest fails, report a parse error and retain the previous verified source state instead of advancing it. Retry with a fresh consistent snapshot. Recovery full-reparse removes that source's retained old events and source-scoped audit rows before adding the newly parsed representation, so old and replacement versions are not blended.
+## 4. Reconcile project membership before attesting histories
 
-State keeps irreversible `isolated_call_hashes` for quarantined old-memory tool calls. This lets a later append-only tail quarantine the matching tool result without storing the raw call id or memory content.
-
-State also accumulates `transport_records_seen`, `transport_records_accounted`, and `transport_records_unaccounted` per source; run totals are recomputed from those source denominators so an unchanged incremental run cannot erase an old accounting gap. Its `project_identities` map binds an irreversible source/session marker to the prior sanitized project key/label, keeping later tails in the same project without storing the raw private working directory. If there is no event, unsupported-format, source-denominator, policy, or coverage change—and the prior publication manifest still matches—a previously complete publication may be preserved. Otherwise affected semantic conclusions reopen.
-
-## 4. Initialize or continue semantic review
-
-For a first review:
+Create the proposal review first:
 
 ```text
 <python> scripts/session_kb.py review-init --kb /approved/private/kb
 ```
 
-For an incremental review, explicitly seed it from the prior review:
+Inspect proposed chains for false merges, false splits, renamed/moved work, and cross-Agent continuations. Evidence strength descends from explicit user intent, native continuation lineage, concrete shared artifacts/dependencies, observed handoffs/corrections, then path/title hints.
+
+When correction is needed, prepare a private hash-bound membership plan and rerun:
 
 ```text
 <python> scripts/session_kb.py review-init \
   --kb /approved/private/kb \
-  --from-review /approved/private/kb/review/PRIOR_REVIEW.json
+  --membership-plan /approved/private/project-membership-plan.json
 ```
 
-New reviews use review version 3. Their global and per-project `event_set_sha256` values hash each complete canonical unified-event record; `event_ids_sha256` separately proves ordering. `--from-review` carries only projects whose full semantic event hash/count matches and whose evidence remains valid. Changed projects remain unreviewed. When any project is carried, `cross_project_recheck.required` is true. After comparing carried and changed chains, set `completed: true`, `reviewed_at`, and a concrete `rationale`; validation rejects a carried review without them. An unchanged endpoint does not make a relationship valid when the other endpoint changed.
+The plan may `merge`, `split`, or `reassign` exact event subsets. It must cite evidence events inside the assignment and bind the global evidence set, each proposed source project, ordered event ids, selected semantic events, and rationale. The runtime rejects stale plans, duplicate assignment, foreign events, event loss, and malformed operations. Unassigned events keep their deterministic proposal; never guess membership for a new tail.
 
-### Read every chain with native checkpoints
+Use `review-packet --review REVIEW.json` after regrouping. Distillation publishes the canonical before/after partition and event-level diff to `audit/project-membership.json`. Follow the full schema and gates in [references/review-contract.md](references/review-contract.md).
 
-For a small chain, omit paging options. For a long chain, use bounded contiguous ranges:
+## 5. Read every chain, with evidence-block reuse only after a full first pass
+
+For a small chain, omit paging. For a long chain, request contiguous ranges:
 
 ```text
 <python> scripts/session_kb.py review-packet \
   --kb /approved/private/kb \
+  --review /approved/private/kb/review/review.json \
   --project-key PROJECT_KEY \
   --start-event 0 \
   --max-events 200
 ```
 
-Copy the returned `receipt` object into that project's `reading_receipts`, then resume from `range.next_start_event`. For every range, verify the previous/next event ids, cumulative count, slice boundary, project event count, `event_ids_sha256`, and full semantic `event_set_sha256`. Receipts must cover event indexes `0..event_count` contiguously without overlap. Validation checks each receipt's project hash, slice hash, first/last event ids, and final coverage. Search hits, summaries, high-signal lists, and truncated output do not satisfy complete-chain reading.
+Copy each packet `receipt` into `reading_receipts`. Copy its `semantic_chunk`, add evidence-bound notes whose event ids stay inside that exact range, add the note hash, date, and attestation, then resume at `range.next_start_event`. Ranges must cover `0..event_count` without gaps or overlap. Search hits, summaries, high-signal lists, and truncated output do not count as reading.
 
-### Reconcile actors before promoting first-person claims
+Review version 4 binds complete canonical events, ordered ids, each chunk, and one-event adjacent boundaries. On `review-init --from-review PRIOR_REVIEW.json`:
 
-Inspect every project user lane. When the deterministic event has `native_user` or `unknown_user`, add an `actor_attributions` entry for the project lane or exact event before using it as primary-user evidence. Attribution needs a bounded actor kind, permitted semantic basis, evidence event ids, and rationale. If identity is unresolved, keep `unknown_user`; do not publish identity, preference, approval, or feedback as belonging to the primary user.
+- a fully identical reviewed project may carry as a whole;
+- a changed project may reuse only v4 semantic chunks whose content, order, notes, and adjacent boundary hashes remain exact;
+- changed, uncovered, and boundary-affected ranges reopen;
+- free-text project conclusions from the old changed project do not carry;
+- any chunk reuse requires a fresh `project_synthesis` over the complete current chain and a fresh cross-project recheck.
 
-### Write granular histories and completion states
+This saves repeated semantic reading, not full physical I/O, and never lets cached notes replace the current full-project synthesis.
 
-For every real project, fill all applicable history sections: objective, changes/corrections, actions/artifacts, validation/observations, failures/fallbacks, delivery/state, and remaining work. Every item needs chain-local evidence ids and an honest status. Mark fully read noise/test-only chains `reviewed-no-knowledge` with a reason.
+## 6. Resolve actors, write histories, links, and feedback
 
-Record the highest supported completion level separately: requested, designed, implemented, artifact-created, installed, enabled, invoked, automated-tests-passed, real-interaction-observed, user-accepted, submitted, merged, remotely-published, publicly-reachable, or unknown. A higher label needs matching evidence; Agent prose alone is `agent-reported`, not an observation.
+Before native/unknown user events support first-person claims, add a bounded project-lane or exact-event `actor_attributions` record. Leave unresolved identity as `unknown_user`.
 
-### Record feedback without inventing a permanent rule
+For every real project, fill objective, changes/corrections, actions/artifacts, validation/observations, failures/fallbacks, delivery/state, and remaining work. Every item needs chain-local event ids and an honest status. Fully read noise/test chains may be `reviewed-no-knowledge` with a reason.
 
-Use `feedback_signals` for primary-user positive/negative/gap feedback or primary-user/observable outcome evidence. Record its project, object, scope, statement, evidence, status, and exact applicability.
+Record the highest evidence-supported completion layer separately. `requested`, `designed`, `implemented`, `artifact-created`, `installed`, `enabled`, `invoked`, `automated-tests-passed`, `real-interaction-observed`, `user-accepted`, `submitted`, `merged`, `remotely-published`, and `publicly-reachable` are different states.
 
-Use `rule_evolutions` only when an observed feedback record motivates a versioned rule candidate. Candidates and rejected changes never activate a rule. Approved changes need an existing confirmed claim with the same scope plus semantically attributed approval evidence. Cross-project repeated context can establish a bounded confirmed rule, but it does not become an approved evolution without the approval gate. A global change needs two observed-feedback project contexts or explicit global approval. Only `validated`, with distinct baseline and later evidence, a passed behavior check, and observable or primary-user after-evidence, may be described as evolved. Follow [references/evolution-contract.md](references/evolution-contract.md).
+Validate relationships only after histories stabilize. Reopen both complete endpoint packets and cite both sides. Only confirmed edges become reciprocal Markdown navigation; the graph keeps true direction. Every published project must be `linked` or an explained `intentional-isolate`.
 
-## 5. Validate evidence-bound relationships
-
-After project histories stabilize, compare objectives, corrections, artifacts, dependencies, handoffs, and contradictions.
-
-1. Nominate candidates from meaning and user intent, not lexical overlap.
-2. Reopen the complete packet for both endpoints.
-3. Record direction, precise relation, evidence basis, confidence, rationale, and event ids from both chains.
-4. Use `confirmed` only when both endpoints support it. Preserve insufficient candidates as `uncertain` and disproved candidates as `rejected`.
-5. Set every published project to `linked` or `intentional-isolate`; an isolate needs a reason.
-
-Only confirmed edges become reciprocal Markdown navigation. The graph keeps the true direction; the backlink does not reverse causality.
+Record feedback at its actual object and scope. Use executable evolution operations when a lasting rule is proposed:
 
 ```text
-<python> scripts/session_kb.py validate-review --kb /approved/private/kb --review /approved/private/kb/review/REVIEW.json
+<python> scripts/session_kb.py evolution-clusters --review REVIEW.json
+<python> scripts/session_kb.py evolution-propose --kb /approved/private/kb --review REVIEW.json --proposal PROPOSAL.json
+<python> scripts/session_kb.py evolution-queue --review REVIEW.json
+<python> scripts/session_kb.py evolution-decide --kb /approved/private/kb --review REVIEW.json --evolution-id ID --decision approve --approval-event-id EVENT --promoted-claim-id CLAIM
+<python> scripts/session_kb.py evolution-evaluate --kb /approved/private/kb --review REVIEW.json --evolution-id ID --result passed --baseline-event-id BEFORE --validation-event-id AFTER --observed-change "Observed bounded change"
 ```
 
-Fix validation failures or preserve the uncertainty. Never bypass the gate.
+Exact clustering does not perform semantic merging. A CLI flag does not manufacture user approval. Candidates and rejected changes stay inactive; only a validated change may be called evolved. When a required `cross_project_recheck` exists, an evolution mutation reopens it; review the changed current state and record a fresh checked-state hash instead of silently re-signing the old attestation. Read [references/evolution-contract.md](references/evolution-contract.md).
 
-## 6. Distill, then pass both retrieval gates
+Validate before publication:
 
 ```text
-<python> scripts/session_kb.py distill --kb /approved/private/kb --review /approved/private/kb/review/REVIEW.json
-<python> scripts/session_kb.py verify-retrieval \
-  --kb /approved/private/kb \
-  --related-task "a task that must retrieve reviewed project knowledge" \
-  --unrelated-task "a task that must return no_match" \
-  --expected-project-key PROJECT_KEY
+<python> scripts/session_kb.py validate-review --kb /approved/private/kb --review REVIEW.json
 ```
 
-`distill` ends at `needs_retrieval_verification`. `verify-retrieval` writes a content-free audit: it stores task hashes, selection summaries, and a manifest hash of the published knowledge files, not the task or document contents. The relevant task must select reviewed project knowledge, and the unrelated task must return `no_match`. Failure keeps the completion gates closed. Editing, replacing, or deleting a published knowledge file after verification invalidates the manifest and requires distillation/reverification as appropriate.
+Fix errors or preserve uncertainty. Never bypass the gate.
 
-During distillation, `audit/published-files.json` records the current generated document paths. A project document present in the prior ledger but absent from the new reviewed publication—such as after a title/path change—is moved to `knowledge/archive/<run-id>/` and recorded in `audit/stale-project-documents.json`. Reject a symlink at the stale source, archive root, run directory, destination, or any destination containment check. Archived files are private history, not current indexed knowledge; do not use or link them as current Reader context.
+## 7. Distill and pass the v0.5 retrieval suite
 
-Only `complete` or `complete_with_unsupported_formats` is a normal final state. The latter preserves acknowledged unsupported inputs; it never upgrades them to compatible. At handoff, report the frozen and semantic denominators, exact input formats present, unknown candidates, scan/host/system boundaries, privacy results, actor ambiguities, carry-forward scope, relationships, evolution state, retrieval checks, errors/fallbacks, and remaining work.
+```text
+<python> scripts/session_kb.py distill --kb /approved/private/kb --review REVIEW.json
+<python> scripts/session_kb.py verify-retrieval --kb /approved/private/kb --eval-set /approved/private/retrieval-eval.json
+```
 
-## 7. Offer the separate Reader
+`distill` ends at `needs_retrieval_verification`. The private eval set needs at least two distinct related paraphrases and two distinct hard negatives after privacy cleanup. It has one suite-level `retrieval_profile` (`min_score`, `max_projects`, `max_related`) shared by every case; case-level overrides are invalid. Related cases may declare expected project keys/document types and `min_project_matches`. Every case must pass, and the suite/completion hashes bind the shared profile and expectations.
 
-After all gates pass, ask whether to register the approved location for `$agent-knowledge-reader`. Registration is a separate local write:
+The verifier independently requires all prerequisite publication gates: `frozen_snapshot`, `transport_accounted`, `parse_clean`, `discovery_coverage_complete`, `semantic_review_complete`, `knowledge_graph_complete`, and `published_knowledge`. Unsupported candidates must additionally be clear or explicitly acknowledged. Reader and registration repeat the same prerequisite checks; no earlier successful caller substitutes for them.
+
+The verification audit stores task hashes, redaction counts, bounded selection summaries, and a manifest of published knowledge, not task text or document bodies. Any later edit, replacement, deletion, retract, or forget invalidates the publication manifest and retrieval gates.
+
+The legacy `--related-task` plus `--unrelated-task` pair remains a diagnostic interface. A v0.5 publication uses retrieval contract 2; the pair may report `legacy_pair_passed_needs_suite` but cannot reach a final complete state.
+
+Only `complete` or `complete_with_unsupported_formats` is a normal final state. The latter preserves acknowledged unsupported inputs and does not upgrade them to compatible. Report denominators, exact formats, unknowns, host/system boundaries, privacy results, actor ambiguities, regrouping, chunk reuse, links, evolution state, lifecycle state, retrieval cases, errors/fallbacks, and remaining work.
+
+## 8. Handle lifecycle requests as a separate, explicit workflow
+
+When the user asks to retract, forget, set a retention/recheck date, or inspect due items, read [references/lifecycle-contract.md](references/lifecycle-contract.md). Plan first:
+
+```text
+<python> scripts/session_kb.py lifecycle-plan --kb /approved/private/kb --action forget --event-id EVENT --plan /approved/private/plan.json
+```
+
+Inspect matched/unmatched selectors, impact, and backup warning. `lifecycle-apply` without `--commit` remains dry-run. Apply only the exact unchanged plan after explicit confirmation:
+
+```text
+<python> scripts/session_kb.py lifecycle-apply --kb /approved/private/kb --plan /approved/private/plan.json --commit
+```
+
+`retract` keeps provenance but deactivates current conclusions. `forget` removes selected material from generated knowledge and writes content-free hashed tombstones so incremental reconstruction does not reintroduce it. `schedule` records dates; `lifecycle-due` reports due checks without claim bodies and never auto-deletes. None edits source sessions or guarantees removal from backups, sync history, caches, exports, or other devices.
+
+A committed lifecycle change uses a recoverable transaction. Before any knowledge body changes, completion becomes fail-closed `lifecycle-applying`; Reader, registration, and rebuild/incremental entrypoints refuse while its journal exists. Stage only the final generated bytes, reject selected forgotten literals from forget staging, commit the content-free tombstone before body writes/deletes, and write final completion last. An interruption may resume only with the exact same plan; refuse a different plan, and remove the private journal/staging only after success. Never delete an ambiguous transaction manually to bypass recovery.
+
+## 9. Offer the separate Reader
+
+After all gates pass, ask whether to register the approved location:
 
 ```text
 <python> scripts/session_kb.py register-kb --name portable-name --kb /approved/private/kb --default
 ```
 
-Do not register without confirmation. The Reader can use an explicit path without registration and must reject incomplete retrieval gates.
+Registration is a separate local write and needs confirmation. The Reader may instead use an explicit path. It rejects drafts, lifecycle-pending outputs, retrieval-suite failures, run mismatches, changed publication files, graph/index allowlist mismatches, and archive paths.
 
-`register-kb` uses a standalone sibling lock for the registry file and an atomic replacement, separate from the knowledge-base lock. If that lock exists, inspect ownership before treating it as stale; do not run concurrent registry writers.
+Every Reader query returns a non-persisted `usage_receipt` with run id, task hash, match status, selected project keys/document paths, query parameters, `verified_profile_used`, and publication-manifest hash. With no explicit threshold flags, Reader uses the verified suite profile. An override is reported as outside that verified profile and must not be presented as equivalent retrieval behavior. The receipt records what context was selected; it does not itself learn, approve, or mutate a rule.
 
-The Reader resolves the graph from the published index's `graph.path` when supplied; it never substitutes another on-disk graph. It verifies graph `semantic_status`, graph/index run id, safe unique indexed document paths, exact equality between graph document nodes and the index document allowlist, safe `document_path` references, and existing edge endpoints. Archive paths are rejected at path resolution and never traversed. The retrieval manifest uses the same validated graph loader.
+## 10. Run golden and public-source gates
 
-## 8. Public source gate
+The repository's public inline synthetic manifest exercises all seven declared adapters without real data:
 
-Before packaging or publishing the Skill pack:
+```text
+<python> scripts/session_kb.py golden-check \
+  --fixture-root tests/fixtures/golden/v1 \
+  --manifest tests/fixtures/golden/v1/manifest.json
+```
+
+Synthetic success is regression evidence, not a new compatibility claim. Real samples and their manifests stay in a user-held private root, with isolated output outside the repository. A new compatibility claim still needs exact-format implementation, contract tests, and real-sample smoke evidence.
+
+Before packaging or publishing:
 
 ```text
 <python> agent-session-knowledge-rebuilder/scripts/session_kb.py release-check --root /path/to/skill-pack
 ```
 
-For private identifiers, prefer a newline-delimited file outside the release root with repeated `--deny-term-file /private/check-terms.txt`; it avoids placing the terms in committed files and reduces command-line history exposure. `--deny-term` remains available for controlled use. A pass must still be paired with staging-set inspection and human review. This repository is source-visible under a noncommercial limited license; never call that privacy scan permission to publish private knowledge or real sessions.
+Keep private deny terms in newline-delimited files outside the release root and pass them with `--deny-term-file`. Pair the automated gate with staging-set inspection and human review. The repository is source-visible under a noncommercial limited license; a privacy scan is never permission to publish private knowledge or sessions.

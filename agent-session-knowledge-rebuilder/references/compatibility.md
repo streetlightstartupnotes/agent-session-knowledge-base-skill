@@ -24,6 +24,14 @@ Row order is not an input, host, or operating-system priority.
 | Neo Claude-compatible project JSONL | `neo-claude-jsonl` | Implemented | Verified with unit/contract tests and an isolated real-sample ingest/review-template smoke |
 | Cursor `agent-transcripts` JSONL | `cursor-agent-jsonl` | Implemented | Verified with unit/contract tests and an isolated real-sample ingest/review-template smoke |
 
+## Public synthetic regression pack
+
+`tests/fixtures/golden/v1/manifest.json` contains one inline, invented case for each of the seven adapters above. `golden-check` requires the exact expected adapter count, minimum retained events, required event types, clean parsing, complete transport accounting, zero unknown/unsupported candidates, zero coverage gaps, and zero discovery errors. A supported file mixed with an unknown candidate cannot produce a passing case.
+
+This pack is safe to publish and catches format regressions, but it does not create or update compatibility claims. `compatibility_claim_updated` remains false. The verified rows above depend on their separately held private real-sample evidence; real transcripts and outputs never enter the public repository.
+
+The v0.5 project-membership correction, semantic-chunk reuse, lifecycle, multi-case retrieval, Reader receipt, evolution operations, and golden runner were exercised with isolated synthetic tests in this release. At the user's request, v0.5 did not reread private real sessions for a new smoke run. That boundary does not expand or erase the previously recorded exact-format evidence, and it must be stated when reporting this release's validation.
+
 ## Explicitly unsupported or unverified
 
 | Candidate | Current evidence | Accurate status |

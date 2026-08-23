@@ -1,0 +1,56 @@
+{
+  "golden_version": 1,
+  "fixture_kind": "public-synthetic",
+  "cases": [
+    {
+      "id": "codex-jsonl",
+      "files": [{"path": "rollout.jsonl", "text": "{\"type\":\"session_meta\",\"payload\":{\"id\":\"golden-codex\",\"cwd\":\"/synthetic/codex\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Build the synthetic Codex artifact.\"}}\n{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"The synthetic Codex artifact draft exists.\"}}\n"}],
+      "expected_adapters": {"codex-jsonl": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    },
+    {
+      "id": "clacky-json",
+      "files": [{"path": "session.json", "text": "{\"session_id\":\"golden-clacky-json\",\"working_dir\":\"/synthetic/clacky-json\",\"messages\":[{\"role\":\"user\",\"content\":\"Build the synthetic Clacky JSON artifact.\"},{\"role\":\"assistant\",\"content\":\"The synthetic Clacky JSON artifact draft exists.\"}]}\n"}],
+      "expected_adapters": {"clacky-json": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    },
+    {
+      "id": "clacky-chunk",
+      "files": [{"path": "2026-01-01-00-00-00-00000000-0000-4000-8000-000000000001-chunk-1.md", "text": "## User\n\nBuild the synthetic Clacky chunk artifact.\n\n## Assistant\n\nThe synthetic Clacky chunk artifact draft exists.\n"}],
+      "expected_adapters": {"clacky-chunk": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    },
+    {
+      "id": "claude-code-jsonl",
+      "files": [{"path": "claude.jsonl", "text": "{\"type\":\"user\",\"sessionId\":\"golden-claude\",\"cwd\":\"/synthetic/claude\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Build the synthetic Claude artifact.\"}]}}\n{\"type\":\"assistant\",\"sessionId\":\"golden-claude\",\"cwd\":\"/synthetic/claude\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"synthetic hidden reasoning\"},{\"type\":\"text\",\"text\":\"The synthetic Claude artifact draft exists.\"}]}}\n"}],
+      "expected_adapters": {"claude-code-jsonl": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"],
+      "forbidden_text": ["synthetic hidden reasoning"]
+    },
+    {
+      "id": "workbuddy-jsonl",
+      "files": [{"path": "workbuddy.jsonl", "text": "{\"type\":\"message\",\"sessionId\":\"golden-workbuddy\",\"providerData\":{},\"cwd\":\"/synthetic/workbuddy\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Build the synthetic WorkBuddy artifact.\"}]}\n{\"type\":\"message\",\"sessionId\":\"golden-workbuddy\",\"providerData\":{},\"cwd\":\"/synthetic/workbuddy\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"The synthetic WorkBuddy artifact draft exists.\"}]}\n"}],
+      "expected_adapters": {"workbuddy-jsonl": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    },
+    {
+      "id": "neo-claude-jsonl",
+      "files": [{"path": ".neo/projects/synthetic/neo.jsonl", "text": "{\"type\":\"user\",\"sessionId\":\"golden-neo\",\"entrypoint\":\"sdk-ts\",\"userType\":\"external\",\"cwd\":\"/synthetic/neo\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Build the synthetic Neo artifact.\"}]}}\n{\"type\":\"assistant\",\"sessionId\":\"golden-neo\",\"entrypoint\":\"sdk-ts\",\"userType\":\"external\",\"cwd\":\"/synthetic/neo\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The synthetic Neo artifact draft exists.\"}]}}\n"}],
+      "expected_adapters": {"neo-claude-jsonl": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    },
+    {
+      "id": "cursor-agent-jsonl",
+      "files": [{"path": ".cursor/projects/synthetic/agent-transcripts/cursor.jsonl", "text": "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Build the synthetic Cursor artifact.\"}]}}\n{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"The synthetic Cursor artifact draft exists.\"}]}}\n"}],
+      "expected_adapters": {"cursor-agent-jsonl": 1},
+      "minimum_events": 2,
+      "required_event_types": ["message"]
+    }
+  ]
+}

@@ -15,7 +15,7 @@ Keep four denominators separate throughout the run:
 3. sanitized retained events with an explicit semantic disposition;
 4. published claims and project assertions with valid evidence links.
 
-The corresponding evidence gates are freeze, ingest, review, and publish. Publication is followed by two retrieval gates: a related task must match and an unrelated task must return `no_match`. A later gate cannot repair an unaccounted earlier denominator. `audit/completion-report.json` is the machine-readable authority for which gates passed.
+The corresponding evidence gates are freeze, ingest, review, and publish. A v0.5 publication is followed by a retrieval eval set with at least two distinct related paraphrases and two distinct hard negatives. A later gate cannot repair an unaccounted earlier denominator. `audit/completion-report.json` is the machine-readable authority for which gates passed.
 
 ## Distill in four passes
 
@@ -33,7 +33,9 @@ Preserve old-memory isolation across append-only runs with irreversible call-id 
 
 Use explicit session ids, parent/continuation links, stable project ids, working directories, and repeated concrete artifacts to route sessions. Titles and keyword similarity may nominate a link but cannot prove one. When the link is uncertain, keep separate chains and record the question.
 
-Treat a generated `project_key` as a routing proposal, not semantic truth. Before writing histories, compare proposed chains for false merges and false splits. A shared working directory can contain unrelated efforts; one real project can move across directories, Agents, or session identifiers. Explicit user intent, native continuation lineage, and concrete shared artifacts outrank path and title hints. Renaming a review entry or adding an alias does not change its event membership. If the current review schema cannot express the correct grouping, leave the affected project unreviewed and report the blocker instead of publishing a misleading dossier.
+Treat a generated `project_key` as a routing proposal, not semantic truth. Before writing histories, compare proposed chains for false merges and false splits. A shared working directory can contain unrelated efforts; one real project can move across directories, Agents, or session identifiers. Explicit user intent, native continuation lineage, and concrete shared artifacts outrank path and title hints. Renaming a review entry or adding an alias does not change its event membership.
+
+Review version 4 can apply a hash-bound membership plan that merges proposed chains, splits exact event subsets, or reassigns them to a stable project key. The plan must bind the raw global event set, every proposed source project, selected ordered event ids, selected semantic events, and evidence inside that exact assignment. Unassigned events remain in their proposal. Read and write histories against the effective partition, and publish the canonical before/after/event-diff audit. If evidence still cannot support a safe assignment, leave it unreviewed rather than publishing a misleading dossier.
 
 Read every retained event in the chosen chain in source order. While reading, maintain six fields:
 
@@ -46,9 +48,11 @@ Read every retained event in the chosen chain in source order. While reading, ma
 
 Write a narrative project history from those fields. It should be detailed enough that another Agent can continue without reopening every transcript, yet each important claim should retain event ids. Do not replace the history with a source index, feature list, or one-paragraph success summary.
 
-Start with `review-init`. Review version 3 hashes the complete canonical unified-event records for the full retained set and each project, while a separate hash fixes ordered event ids. A review remains valid only for those exact count/hash pairs. Mark every chain `reviewed` or `reviewed-no-knowledge`; silence is not review.
+Start with `review-init`. Review version 4 hashes the complete canonical unified-event records for the full retained set and each effective project, while a separate hash fixes ordered event ids. A review remains valid only for those exact count/hash pairs and its canonical membership partition. Mark every chain `reviewed` or `reviewed-no-knowledge`; silence is not review.
 
-On an incremental run, use `review-init --from-review PRIOR_REVIEW.json`. It carries only full-semantic-hash-identical reviewed projects, their reading receipts, and evidence records whose cited events remain valid. Reopen every changed chain listed in `audit/impact-report.json`. After any carry-forward, complete `cross_project_recheck`: revisit links, conflicts, repeated-context claims, global scopes, and evolved rules across unchanged and changed projects. Hash identity prevents unnecessary rereading; it does not prove cross-project meaning.
+On an incremental run, use `review-init --from-review PRIOR_REVIEW.json`. A fully identical v4 project can carry as a whole. A changed project can carry only hash-bound semantic chunks whose selected events, evidence notes, note hashes, and one-event adjacent boundaries remain identical. Reopen every uncovered, changed, or boundary-affected range. Old free-text histories from the changed project do not carry.
+
+After partial reuse, combine the carried evidence notes with every freshly reopened range and write a new full-project synthesis bound to all current publishable conclusions. After any whole-project or chunk carry-forward, complete `cross_project_recheck`: revisit membership, links, conflicts, repeated-context claims, global scopes, approvals, and evolved rules across unchanged and changed projects. Hash identity prevents unnecessary rereading; it does not prove current whole-project or cross-project meaning.
 
 ### 3. Derive cross-project knowledge
 
@@ -76,6 +80,7 @@ Publishing materializes one graph edge and reciprocal Markdown navigation for ea
 - Deduplicate exact and semantic replays before counting patterns. Approval transcripts and imported history must not amplify a statement.
 - Route by project first. Read one complete chain at a time instead of loading the whole corpus into one context.
 - For every chain, copy each `review-packet` `receipt` into the project's `reading_receipts`. If a chain exceeds one context or tool response, call `review-packet --start-event N --max-events K` for consecutive non-overlapping ranges. Resume from `range.next_start_event`; verify the boundary event ids, accumulate `returned_event_count`, and compare both ordered-id and full semantic event-set hashes. Receipts must cover `0..event_count` without gaps or overlap. A truncated response never satisfies complete-chain attestation.
+- During the first complete read, preserve each exact range as an attested `semantic_chunk` with in-range evidence notes and note hashes. On a later run, reuse only chunks whose range and adjacent-boundary hashes still match; reread the reported complements and synthesize the complete current project again.
 - Prioritize corrections, errors, state transitions, patches, tests, browser/device observations, and deliveries when constructing the project state sheet. Still read the surrounding messages so the priority signal does not become a context-free conclusion.
 - For concrete feedback, preserve the rejected form and accepted replacement as `before` and `after`, plus the scope where the lesson applies. This is more reusable and less hallucinatory than turning one correction into a universal personality rule.
 - Store the detailed project history once. Later tasks retrieve only evidence rules, the relevant base rule set, and one to three matching projects.
@@ -111,6 +116,6 @@ Before handoff, sample every promoted identity fact and collaboration rule back 
 
 If evidence is missing, write the uncertainty. An explicit unresolved item is a successful reconstruction outcome; a plausible invented bridge is not.
 
-After the audit passes, publish with `distill`. Then run `verify-retrieval` with a related task that must match and an unrelated task that must return `no_match`. Query and verification must load the graph selected by the published index, verify graph status/run id and exact document allowlist equality, and reject every archive path. Do not register or invoke the companion Reader as maintained knowledge until both machine gates pass. Retrieval precision and graph containment are part of the completion contract, not optional conveniences.
+After the audit passes, publish with `distill`. Then run `verify-retrieval --eval-set` with at least two distinct related paraphrases and two distinct hard negatives after privacy cleanup. Every case uses one shared suite-level retrieval profile; case-level threshold overrides are invalid. Every related expectation and every hard-negative `no_match` must pass. Query and verification must load the graph selected by the published index, verify all prerequisite publication gates, graph status/run id, and exact document allowlist equality, and reject every archive path. The legacy one-related/one-unrelated pair is diagnostic only for a v0.5 publication. Do not register or invoke the companion Reader as maintained knowledge until the suite passes. Retrieval precision and graph containment are part of the completion contract, not optional conveniences.
 
 During a later distillation, compare current project paths with `audit/published-files.json`. Archive prior generated project documents absent from the current reviewed set under `knowledge/archive/<run-id>/`, record the move in `audit/stale-project-documents.json`, and exclude the archive from current indexed retrieval. This preserves history without leaving renamed or removed dossiers looking current.

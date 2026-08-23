@@ -60,7 +60,11 @@ Deterministic `project_key` values are routing proposals. Before semantic attest
 3. a concrete shared artifact, repository, output, dependency, correction, or observed handoff;
 4. working directory and titles only as supporting hints.
 
-Never merge solely by directory, title, broad type, or keyword overlap. Never split a continuation solely because its path or Agent changed. If the current evidence/review structure cannot faithfully represent a required merge or split, do not attest or publish that project set. Report the grouping blocker instead of using a graph link to disguise it.
+Never merge solely by directory, title, broad type, or keyword overlap. Never split a continuation solely because its path or Agent changed.
+
+Review version 4 can apply an explicit `project_membership` plan through `review-init --membership-plan`. A plan may merge multiple proposed projects, split strict event subsets, or reassign one proposed subset to a stable project key. It must bind the current global event set, every proposed source-project hash, ordered selected event ids, selected semantic-event hash, permitted evidence basis, evidence events inside that exact assignment, and a rationale. Unassigned events keep the deterministic proposal. Reject stale evidence, duplicate assignment, foreign events, loss, or duplication.
+
+After regrouping, read packets with `review-packet --review REVIEW.json` so the packet uses the effective partition. Distillation must publish the canonical proposal/result denominators, per-event diff, and derived merge/split/reassign audit. When the evidence still cannot support a safe assignment, leave the affected chain unreviewed. A graph link cannot repair wrong project membership.
 
 ## Actor reconciliation
 
@@ -81,7 +85,23 @@ Search, keyword ranking, high-signal event lists, and summaries may route attent
 
 ## Incremental semantic reuse
 
-Use `review-init --from-review PRIOR_REVIEW.json` only after the new frozen evidence run exists. The command may carry full-semantic-hash-identical reviewed projects, their valid reading receipts, and evidence records; changed chains remain unreviewed. After any carry-forward, complete the machine-checked `cross_project_recheck` across relationships, repeated-context claims, conflicts, supersession, global scope, and feedback-governed rules. An unchanged project hash proves only that chain's events stayed unchanged.
+Use `review-init --from-review PRIOR_REVIEW.json` only after the new frozen evidence run exists. A full-semantic-hash-identical v4 reviewed project may carry as a whole. A changed project may carry only v4 `semantic_chunks` whose exact event range, ordered ids, full semantic hash, evidence-bound notes, note hashes, and one-event adjacent boundary hash still match. Changed, uncovered, or boundary-affected ranges remain open; old free-text project conclusions do not carry from a changed chain.
+
+The first pass must still read every event. Each reusable chunk needs its own attested evidence notes. After any partial chunk reuse, reread every `project_synthesis.reopened_ranges` range and complete a fresh full-project synthesis bound to all current publishable conclusions. After whole-project or chunk carry-forward, complete the machine-checked `cross_project_recheck` across membership, relationships, repeated-context claims, conflicts, supersession, global scope, and feedback-governed rules. An unchanged chunk proves only that bounded evidence and its adjacent boundary stayed unchanged.
+
+Evolution mutation commands reopen an already completed cross-project attestation when they change review state. Recompute and complete the recheck after the decision/evaluation; never copy or silently re-sign the previous cross-project hash.
+
+## Generated-knowledge lifecycle boundary
+
+`lifecycle-plan` is always read-only and state-bound. `lifecycle-apply` mutates only with `--commit`, only while the generated state still matches the plan, and under the knowledge-base writer lock. `retract` preserves provenance but deactivates current conclusions. `forget` scrubs selected generated bodies and dependent knowledge while retaining content-free hashed tombstones. `schedule` records dates and never auto-deletes.
+
+No lifecycle action changes source sessions or guarantees erasure from backup, sync history, cache, export, cloud, or another device. Retract/forget invalidate publication and both retrieval contracts; the affected review, distillation, and v0.5 suite must pass again before Reader use. Read [lifecycle-contract.md](lifecycle-contract.md).
+
+## Publication prerequisites and retrieval contract
+
+Every final retrieval verifier, Reader query, and registry write independently requires the same prerequisite publication gates: `frozen_snapshot`, `transport_accounted`, `parse_clean`, `discovery_coverage_complete`, `semantic_review_complete`, `knowledge_graph_complete`, and `published_knowledge`. Unsupported candidates must additionally be clear or explicitly acknowledged; acknowledgement never changes their support status.
+
+For a v0.5 publication, final retrieval contract 2 also requires at least two distinct related cases and two distinct hard negatives after privacy cleanup. Every case shares one `retrieval_profile`; case-level threshold overrides are rejected. Every related expectation and every hard-negative `no_match` must pass. Completion binds the profile, suite, exact report, and publication manifest. The legacy related/unrelated pair remains diagnostic; even when both pass it cannot complete a retrieval-contract-2 publication.
 
 ## Incremental transport recovery
 
@@ -112,13 +132,18 @@ A normal successful run has:
 - a complete snapshot-v2, full-digest-bound, read-only source denominator;
 - cumulative per-source transport records with explicit dispositions, exclusions, and errors;
 - complete semantic dispositions for every retained event;
+- a canonical evidence-bound project-membership proposal/result audit, with no unresolved false merge/split in published chains;
 - semantic attribution for every native/unknown user lane used as primary-user evidence;
 - evidence-bound project histories and base claims;
+- complete v4 reading receipts, and—when reused—valid semantic chunks plus a fresh full-project synthesis;
 - confirmed, uncertain, rejected, or intentional-isolate relationship outcomes;
 - evidence-bound feedback/rule records, with only behavior-validated changes described as evolved;
 - a completed cross-project recheck after semantic carry-forward;
 - published knowledge whose indexed graph/status/run/document allowlist passes validation and excludes archives;
-- a machine-verified relevant retrieval match and unrelated `no_match`;
+- no pending retract/forget redistillation state;
+- all seven prerequisite publication gates independently rechecked by verification, Reader, and registration;
+- a retrieval-contract-2 eval set with at least two distinct related matches and two distinct hard-negative `no_match` cases, all passing;
+- completion hashes that bind the exact retrieval-suite report and current published-file manifest;
 - a final report that preserves unsupported formats, operating-system and host limits, privacy results, fallbacks, and remaining work.
 
-`complete_with_unsupported_formats` means supported evidence was published after the unsupported candidates were inspected and acknowledged. It never upgrades those candidates to compatibility.
+The legacy one-related/one-unrelated pair may be useful during diagnosis but is not a final v0.5 gate. `complete_with_unsupported_formats` means supported evidence was published after the unsupported candidates were inspected and acknowledged. It never upgrades those candidates to compatibility.

@@ -14,6 +14,18 @@ from typing import Any
 
 IDENTITY_TASK_RE = re.compile(r"身份|是谁|个人定位|当前方向|经历|简历|who am i|identity|career|current direction", re.IGNORECASE)
 COLLAB_TASK_RE = re.compile(r"协作|偏好|表达|文风|写作|口吻|禁区|怎么配合|collabor|preference|writing|voice|style", re.IGNORECASE)
+PUBLICATION_PREREQUISITE_GATES = (
+    "frozen_snapshot",
+    "transport_accounted",
+    "parse_clean",
+    "discovery_coverage_complete",
+    "semantic_review_complete",
+    "knowledge_graph_complete",
+    "published_knowledge",
+)
+MIN_RELATED_CASES = 2
+MIN_HARD_NEGATIVE_CASES = 2
+DEFAULT_RETRIEVAL_PROFILE = {"min_score": 4, "max_projects": 3, "max_related": 2}
 
 
 def platform_family() -> str:
@@ -151,7 +163,72 @@ def publication_manifest(root: Path, index: dict[str, Any]) -> str:
     return sha256(payload).hexdigest()
 
 
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
+def verify_retrieval_report(root: Path, completion: dict[str, Any]) -> dict[str, Any]:
+    report_path = root.parent / "audit" / "retrieval-verification.json"
+    if not report_path.is_file():
+        raise ValueError("retrieval suite audit report is missing")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise ValueError("retrieval suite audit report is invalid")
+    expected_digest = str(completion.get("retrieval_verification_sha256") or "")
+    if not expected_digest or _canonical_sha256(report) != expected_digest:
+        raise ValueError("retrieval suite audit report does not match the verified completion")
+    if (
+        report.get("report_version") != 2
+        or int(report.get("retrieval_contract_version") or 0) != 2
+        or report.get("run_id") != completion.get("run_id")
+        or report.get("status") != "passed"
+        or report.get("suite_sha256") != completion.get("retrieval_suite_sha256")
+    ):
+        raise ValueError("retrieval suite audit metadata is invalid")
+    profile = report.get("retrieval_profile")
+    if (
+        not isinstance(profile, dict)
+        or set(profile) != set(DEFAULT_RETRIEVAL_PROFILE)
+        or any(not isinstance(profile.get(key), int) or isinstance(profile.get(key), bool) for key in DEFAULT_RETRIEVAL_PROFILE)
+        or not 0 <= int(profile["min_score"]) <= 10_000
+        or not 1 <= int(profile["max_projects"]) <= 20
+        or not 0 <= int(profile["max_related"]) <= 20
+        or profile != completion.get("retrieval_profile")
+    ):
+        raise ValueError("retrieval suite profile is invalid or does not match completion")
+    checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+    if (
+        (checks.get("retrieval_related_suite") or {}).get("passed") is not True
+        or (checks.get("retrieval_hard_negative_suite") or {}).get("passed") is not True
+    ):
+        raise ValueError("retrieval suite audit checks are incomplete")
+    counts = report.get("case_counts") if isinstance(report.get("case_counts"), dict) else {}
+    cases = report.get("cases") if isinstance(report.get("cases"), list) else []
+    total = int(counts.get("total") or 0)
+    related = int(counts.get("related") or 0)
+    negatives = int(counts.get("hard_negative") or 0)
+    if (
+        related < MIN_RELATED_CASES
+        or negatives < MIN_HARD_NEGATIVE_CASES
+        or total != related + negatives
+        or len(cases) != total
+        or int(counts.get("passed") or 0) != total
+        or int(counts.get("failed") or 0) != 0
+        or any(not isinstance(case, dict) or case.get("passed") is not True for case in cases)
+        or sum(case.get("kind") == "related" for case in cases if isinstance(case, dict)) != related
+        or sum(case.get("kind") == "hard_negative" for case in cases if isinstance(case, dict)) != negatives
+    ):
+        raise ValueError("retrieval suite audit case accounting is invalid")
+    report_manifest = report.get("publication_manifest") if isinstance(report.get("publication_manifest"), dict) else {}
+    if report_manifest.get("sha256") != completion.get("publication_manifest_sha256"):
+        raise ValueError("retrieval suite audit publication manifest does not match completion")
+    return report
+
+
 def verify_publication(root: Path, index: dict[str, Any]) -> dict[str, Any]:
+    if (root.parent / "audit" / "lifecycle-transaction.json").exists():
+        raise ValueError("a lifecycle transaction is pending; resume it before reading maintained knowledge")
     completion_path = root.parent / "audit" / "completion-report.json"
     if not completion_path.is_file():
         raise ValueError("legacy-unverified knowledge base: completion report is missing")
@@ -163,9 +240,19 @@ def verify_publication(root: Path, index: dict[str, Any]) -> dict[str, Any]:
     if not index_run_id or completion_run_id != index_run_id:
         raise ValueError("completion run_id does not match knowledge-index run_id")
     gates = completion.get("gates") or {}
-    if gates.get("published_knowledge") is not True:
-        raise ValueError("knowledge publication gate is not complete")
-    if gates.get("retrieval_related_match") is not True or gates.get("retrieval_unrelated_no_match") is not True:
+    missing_prerequisites = [gate for gate in PUBLICATION_PREREQUISITE_GATES if gates.get(gate) is not True]
+    if gates.get("unsupported_formats_clear") is not True and gates.get("unsupported_formats_acknowledged") is not True:
+        missing_prerequisites.append("unsupported_formats_acknowledged")
+    if missing_prerequisites:
+        raise ValueError("knowledge publication prerequisite gates are incomplete: " + ", ".join(missing_prerequisites))
+    retrieval_contract = int(completion.get("retrieval_contract_version") or 1)
+    if retrieval_contract >= 2:
+        if gates.get("retrieval_related_suite") is not True or gates.get("retrieval_hard_negative_suite") is not True:
+            raise ValueError("retrieval suite gates are not complete")
+        if not str(completion.get("retrieval_suite_sha256") or ""):
+            raise ValueError("retrieval suite manifest is missing")
+        verify_retrieval_report(root, completion)
+    elif gates.get("retrieval_related_match") is not True or gates.get("retrieval_unrelated_no_match") is not True:
         raise ValueError("legacy-unverified knowledge base: retrieval verification gates are not complete")
     if completion.get("status") not in {"complete", "complete_with_unsupported_formats"}:
         raise ValueError("knowledge-base completion status is not final")
@@ -236,9 +323,9 @@ def _safe_document(root: Path, item: dict[str, Any], allowed_paths: set[str], em
 def query(
     kb: Path,
     task: str,
-    max_projects: int = 3,
-    max_related: int = 2,
-    min_score: int = 4,
+    max_projects: int | None = None,
+    max_related: int | None = None,
+    min_score: int | None = None,
     emit_content: bool = False,
 ) -> dict[str, Any]:
     root = knowledge_root(kb)
@@ -246,6 +333,22 @@ def query(
     if index.get("semantic_status") != "published":
         raise ValueError("knowledge is not published; complete review and distill before reading it as maintained knowledge")
     completion = verify_publication(root, index)
+    completion_snapshot_sha256 = _canonical_sha256(completion)
+    verified_profile = (
+        dict(completion.get("retrieval_profile"))
+        if int(completion.get("retrieval_contract_version") or 1) >= 2
+        else dict(DEFAULT_RETRIEVAL_PROFILE)
+    )
+    query_profile = {
+        "min_score": verified_profile["min_score"] if min_score is None else min_score,
+        "max_projects": verified_profile["max_projects"] if max_projects is None else max_projects,
+        "max_related": verified_profile["max_related"] if max_related is None else max_related,
+    }
+    if query_profile["min_score"] < 0 or query_profile["max_projects"] < 0 or query_profile["max_related"] < 0:
+        raise ValueError("limits and scores must be non-negative")
+    min_score = query_profile["min_score"]
+    max_projects = query_profile["max_projects"]
+    max_related = query_profile["max_related"]
     documents = [item for item in index.get("documents") or [] if isinstance(item, dict)]
     allowed_paths = {str(item.get("path")) for item in documents if item.get("path")}
     graph = load_validated_graph(root, index)
@@ -327,16 +430,36 @@ def query(
 
     result_items = [_safe_document(root, item, allowed_paths, emit_content=emit_content) for item in selected]
     project_matches = sum(item.get("type") == "project" and "relevance_score" in item for item in selected)
+    match_status = "matched" if project_matches or IDENTITY_TASK_RE.search(task) or COLLAB_TASK_RE.search(task) else "no_match"
+    receipt = {
+        "receipt_version": 1,
+        "run_id": completion.get("run_id"),
+        "task_sha256": sha256(task.encode("utf-8")).hexdigest(),
+        "match_status": match_status,
+        "selected_project_keys": sorted(
+            {str(item.get("project_key")) for item in result_items if item.get("project_key")}
+        ),
+        "selected_document_paths": sorted(str(item.get("relative_path")) for item in result_items if item.get("relative_path")),
+        "publication_manifest_sha256": completion.get("publication_manifest_sha256"),
+        "query_parameters": query_profile,
+        "verified_profile_used": query_profile == verified_profile,
+    }
+    if (root.parent / "audit" / "lifecycle-transaction.json").exists():
+        raise ValueError("a lifecycle transaction began during this read; retry after it is resumed")
+    final_completion = json.loads((root.parent / "audit" / "completion-report.json").read_text(encoding="utf-8"))
+    if not isinstance(final_completion, dict) or _canonical_sha256(final_completion) != completion_snapshot_sha256:
+        raise ValueError("knowledge-base completion changed during this read; retry against a stable publication")
     return {
         "task": task,
         "knowledge_root": str(root),
         "semantic_status": "published",
         "run_id": completion.get("run_id"),
-        "match_status": "matched" if project_matches or IDENTITY_TASK_RE.search(task) or COLLAB_TASK_RE.search(task) else "no_match",
+        "match_status": match_status,
         "selected_count": len(result_items),
         "project_matches": project_matches,
         "related_documents": sum("relationship" in item for item in result_items),
         "documents": result_items,
+        "usage_receipt": receipt,
     }
 
 
@@ -351,9 +474,9 @@ def parser() -> argparse.ArgumentParser:
     target.add_argument("--kb", type=Path)
     query_parser.add_argument("--config", type=Path)
     query_parser.add_argument("--task", required=True)
-    query_parser.add_argument("--max-projects", type=int, default=3)
-    query_parser.add_argument("--max-related", type=int, default=2)
-    query_parser.add_argument("--min-score", type=int, default=4)
+    query_parser.add_argument("--max-projects", type=int, help="Override the verified suite profile for this query.")
+    query_parser.add_argument("--max-related", type=int, help="Override the verified suite profile for this query.")
+    query_parser.add_argument("--min-score", type=int, help="Override the verified suite profile for this query.")
     query_parser.add_argument("--emit-content", action="store_true")
     return root
 
@@ -365,7 +488,8 @@ def main(argv: list[str] | None = None) -> int:
             target = (args.config or default_registry_path()).expanduser()
             print(json.dumps({"registry": str(target), **load_registry(target)}, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        if min(args.max_projects, args.max_related, args.min_score) < 0:
+        supplied_limits = [value for value in (args.max_projects, args.max_related, args.min_score) if value is not None]
+        if supplied_limits and min(supplied_limits) < 0:
             raise ValueError("limits and scores must be non-negative")
         kb = args.kb or resolve_registered(args.name, args.config)
         print(

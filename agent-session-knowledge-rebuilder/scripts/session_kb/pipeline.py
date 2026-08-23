@@ -16,7 +16,7 @@ from .discovery import DiscoveryResult, freeze_sources, validate_snapshot
 from .model import ParseResult, SourceFile, UnifiedEvent, display_path, stable_hash
 from .render import compatibility_markdown, render_knowledge
 from .sanitize import SANITIZER_POLICY_VERSION, Sanitizer, actor_kind, classify_flags, evidence_grade
-from .verification import publication_manifest
+from .verification import publication_manifest, require_publication_prerequisites, require_verified_retrieval_report
 
 
 STREAM_CHUNK_BYTES = 8 * 1024 * 1024
@@ -492,6 +492,33 @@ def _sensitive_count(stats: Counter[str]) -> int:
     )
 
 
+def _lifecycle_forget_hashes(output_dir: Path) -> dict[str, set[str]]:
+    result = {key: set() for key in ("sources", "events", "projects", "event_locators")}
+    for row in _load_jsonl_dicts(output_dir / "audit" / "lifecycle-tombstones.jsonl"):
+        if row.get("action") != "forget":
+            continue
+        values = row.get("affected_identifier_sha256")
+        if not isinstance(values, dict):
+            continue
+        for key in result:
+            result[key].update(str(item) for item in values.get(key) or [] if isinstance(item, str))
+    return result
+
+
+def _lifecycle_hash(value: object) -> str:
+    return sha256(str(value).encode("utf-8", errors="replace")).hexdigest()
+
+
+def _forgotten_by_lifecycle(event: UnifiedEvent, hashes: dict[str, set[str]]) -> bool:
+    locator = _lifecycle_hash(f"{event.source_file_id}\0{event.record_locator}")
+    return bool(
+        _lifecycle_hash(event.source_file_id) in hashes["sources"]
+        or _lifecycle_hash(event.event_id) in hashes["events"]
+        or _lifecycle_hash(event.project_key or "") in hashes["projects"]
+        or locator in hashes["event_locators"]
+    )
+
+
 def build_knowledge_base(
     registry: AdapterRegistry,
     sources: list[SourceFile],
@@ -502,6 +529,8 @@ def build_knowledge_base(
     dry_run: bool = False,
     verified_adapters: set[str] | None = None,
 ) -> dict[str, Any]:
+    if (output_dir.expanduser() / "audit" / "lifecycle-transaction.json").exists():
+        raise ValueError("a lifecycle transaction is pending; resume it before rebuilding the knowledge base")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     if output_dir.exists() and any(output_dir.iterdir()) and not incremental and not dry_run:
         raise ValueError("output directory is not empty; use --incremental or choose a new output")
@@ -793,6 +822,39 @@ def build_knowledge_base(
         combined = filtered
     _assign_logical_sessions(combined)
     events, duplicate_rows = _deduplicate(combined)
+    lifecycle_forget_hashes = _lifecycle_forget_hashes(output_dir) if incremental else {
+        "sources": set(),
+        "events": set(),
+        "projects": set(),
+        "event_locators": set(),
+    }
+    if any(lifecycle_forget_hashes.values()):
+        retained_after_forget: list[UnifiedEvent] = []
+        for event in events:
+            if not _forgotten_by_lifecycle(event, lifecycle_forget_hashes):
+                retained_after_forget.append(event)
+                continue
+            event_hash = _lifecycle_hash(event.event_id)
+            excluded.append(
+                {
+                    "source_file_id": "[FORGOTTEN]",
+                    "record_locator": "[FORGOTTEN]",
+                    "reason": "lifecycle_forget_tombstone",
+                    "event_id_sha256": event_hash,
+                }
+            )
+            dispositions.append(
+                {
+                    "stage": "transport",
+                    "source_file_id": "[FORGOTTEN]",
+                    "record_locator": "[FORGOTTEN]",
+                    "disposition": "quarantined",
+                    "reason": "lifecycle_forget_tombstone",
+                    "event_id_sha256": event_hash,
+                }
+            )
+            counters["lifecycle_forgotten_events_excluded"] += 1
+        events = retained_after_forget
     counters["duplicates_removed"] = len(duplicate_rows)
     retained_ids = {event.event_id for event in events}
     for event in events:
@@ -923,6 +985,33 @@ def build_knowledge_base(
     if source_denominator_changed:
         impact["review_required"] = True
     prior_gates = previous_completion.get("gates") if isinstance(previous_completion.get("gates"), dict) else {}
+    prior_retrieval_contract = int(previous_completion.get("retrieval_contract_version") or 1)
+    previous_prerequisites_valid = False
+    try:
+        require_publication_prerequisites(previous_completion)
+        previous_prerequisites_valid = True
+    except ValueError:
+        previous_prerequisites_valid = False
+    previous_retrieval_audit_valid = prior_retrieval_contract < 2
+    if prior_retrieval_contract >= 2:
+        try:
+            require_verified_retrieval_report(output_dir, previous_completion)
+            previous_retrieval_audit_valid = True
+        except (OSError, ValueError, json.JSONDecodeError):
+            previous_retrieval_audit_valid = False
+    prior_retrieval_verified = bool(
+        prior_gates.get("retrieval_related_match") is True
+        and prior_gates.get("retrieval_unrelated_no_match") is True
+        and (
+            prior_retrieval_contract < 2
+            or (
+                prior_gates.get("retrieval_related_suite") is True
+                and prior_gates.get("retrieval_hard_negative_suite") is True
+                and bool(previous_completion.get("retrieval_suite_sha256"))
+                and previous_retrieval_audit_valid
+            )
+        )
+    )
     previous_manifest_valid = False
     expected_manifest = str(previous_completion.get("publication_manifest_sha256") or "")
     if expected_manifest and previous_index.get("semantic_status") == "published":
@@ -944,14 +1033,15 @@ def build_knowledge_base(
         and previous_index.get("run_id") == previous_completion.get("run_id")
         and previous_completion.get("status") in {"complete", "complete_with_unsupported_formats"}
         and prior_gates.get("published_knowledge") is True
-        and prior_gates.get("retrieval_related_match") is True
-        and prior_gates.get("retrieval_unrelated_no_match") is True
+        and previous_prerequisites_valid
+        and prior_retrieval_verified
         and previous_manifest_valid
         and previous_unsupported == unsupported
         and previous_coverage_gaps == coverage_gaps
     )
     impact["publication_preserved"] = preserve_published
     impact["previous_publication_manifest_valid"] = previous_manifest_valid
+    impact["previous_retrieval_audit_valid"] = previous_retrieval_audit_valid
     impact["published_run_id"] = previous_completion.get("run_id") if preserve_published else None
     knowledge_documents: dict[str, str] = {}
     if not preserve_published:
@@ -966,6 +1056,7 @@ def build_knowledge_base(
     }
     completion = previous_completion if preserve_published else {
         "report_version": 2,
+        "retrieval_contract_version": 2,
         "run_id": run_id,
         "status": "needs_semantic_review",
         "gates": {
@@ -979,6 +1070,8 @@ def build_knowledge_base(
             "published_knowledge": False,
             "retrieval_related_match": False,
             "retrieval_unrelated_no_match": False,
+            "retrieval_related_suite": False,
+            "retrieval_hard_negative_suite": False,
         },
         "notes": [
             "Rebuild completed the deterministic evidence layer only.",

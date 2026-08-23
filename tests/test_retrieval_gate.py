@@ -138,6 +138,10 @@ def _published_kb(root: Path, *, run_id: str = "run-retrieval-1") -> Path:
             "run_id": run_id,
             "status": "needs_retrieval_verification",
             "gates": {
+                "frozen_snapshot": True,
+                "transport_accounted": True,
+                "parse_clean": True,
+                "discovery_coverage_complete": True,
                 "unsupported_formats_clear": True,
                 "semantic_review_complete": True,
                 "knowledge_graph_complete": True,

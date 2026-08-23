@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -11,13 +12,23 @@ from . import VERIFIED_ADAPTERS, __version__
 from .adapters import AdapterRegistry, builtin_registry
 from .config import list_knowledge_bases, output_guidance, register_knowledge_base, validate_output_location
 from .discovery import DiscoveryResult, discover, freeze_sources, load_snapshot, source_from_snapshot
+from .evolution_ops import (
+    approval_queue,
+    atomic_write_review,
+    decide_rule_evolution,
+    feedback_clusters,
+    propose_rule_evolution,
+    record_behavior_evaluation,
+)
+from .golden import run_golden_manifest
 from .inventory import inventory_environment
 from .locking import mutation_lock
+from .lifecycle import apply_lifecycle_plan, list_due_revalidations, plan_lifecycle
 from .pipeline import build_knowledge_base
 from .query import query_knowledge
 from .release import release_check
-from .review import create_review_packet, create_review_template, distill_review, validate_review
-from .verification import verify_retrieval
+from .review import cross_project_state_sha256, create_review_packet, create_review_template, distill_review, validate_review
+from .verification import verify_retrieval, verify_retrieval_suite
 
 
 def _json_print(value: Any) -> None:
@@ -45,6 +56,119 @@ def _write_json_exclusive(path: Path, value: Any) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _load_review_for_evolution(kb: Path, review_path: Path) -> tuple[Path, dict[str, Any], list[Any]]:
+    raw_target = review_path.expanduser()
+    if raw_target.is_symlink():
+        raise ValueError("review path cannot be a symlink")
+    target = raw_target.resolve()
+    review, events, errors = validate_review(kb, target, allow_pending_cross_project_recheck=True)
+    if errors:
+        raise ValueError("current review does not pass the evolution draft contract:\n- " + "\n- ".join(errors))
+    return target, review, events
+
+
+def _reopen_cross_project_recheck(
+    original: dict[str, Any],
+    updated: dict[str, Any],
+    *,
+    operation: str,
+    evolution_id: str,
+) -> dict[str, Any]:
+    """Invalidate, but never manufacture, a human cross-project attestation."""
+
+    before_state = cross_project_state_sha256(original)
+    after_state = cross_project_state_sha256(updated)
+    original_recheck = original.get("cross_project_recheck") if isinstance(original.get("cross_project_recheck"), dict) else {}
+    required = original_recheck.get("required") is True
+    if before_state == after_state or not required:
+        completed = original_recheck.get("completed") is True
+        status = "completed" if required and completed else "pending" if required else "not-required"
+        return {
+            "status": status,
+            "required": required,
+            "completed": completed,
+            "state_changed": before_state != after_state,
+            "distill_ready": not required or completed,
+        }
+
+    recheck = updated.get("cross_project_recheck") if isinstance(updated.get("cross_project_recheck"), dict) else {}
+    recheck = dict(recheck)
+    was_completed = original_recheck.get("completed") is True
+    pending = [dict(item) for item in original_recheck.get("pending_evolution_mutations") or [] if isinstance(item, dict)]
+    mutation = {"operation": operation, "evolution_id": evolution_id, "state_sha256": after_state}
+    if mutation not in pending:
+        pending.append(mutation)
+    reopen_count = original_recheck.get("reopen_count")
+    if not isinstance(reopen_count, int) or isinstance(reopen_count, bool) or reopen_count < 0:
+        reopen_count = 0
+    if was_completed:
+        reopen_count += 1
+        recheck["reopened_from_state_sha256"] = str(original_recheck.get("checked_state_sha256") or before_state)
+    elif not str(recheck.get("reopened_from_state_sha256") or ""):
+        recheck["reopened_from_state_sha256"] = before_state
+    recheck.update(
+        {
+            "required": True,
+            "completed": False,
+            "reviewed_at": "",
+            "rationale": "",
+            "checked_state_sha256": "",
+            "reopen_reason": "evolution-state-changed",
+            "reopen_count": reopen_count,
+            "pending_evolution_mutations": pending,
+        }
+    )
+    updated["cross_project_recheck"] = recheck
+    return {
+        "status": "reopened" if was_completed else "pending",
+        "required": True,
+        "completed": False,
+        "state_changed": True,
+        "distill_ready": False,
+        "reopen_count": reopen_count,
+        "pending_mutation_count": len(pending),
+    }
+
+
+def _write_validated_review_update(
+    kb: Path,
+    review_path: Path,
+    original: dict[str, Any],
+    value: dict[str, Any],
+    *,
+    operation: str,
+    evolution_id: str,
+) -> dict[str, Any]:
+    """Save a legal evolution draft, reopening any invalidated human recheck."""
+
+    raw_target = review_path.expanduser()
+    if raw_target.is_symlink():
+        raise ValueError("review path cannot be a symlink")
+    target = raw_target.resolve()
+    recheck_status = _reopen_cross_project_recheck(
+        original,
+        value,
+        operation=operation,
+        evolution_id=evolution_id,
+    )
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.validate.", suffix=".json", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _, _, errors = validate_review(kb, temporary, allow_pending_cross_project_recheck=True)
+        if errors:
+            raise ValueError("evolution update does not pass the evolution draft contract:\n- " + "\n- ".join(errors))
+        atomic_write_review(raw_target, value)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return recheck_status
 
 
 def _parse_source(value: str) -> tuple[str, Path]:
@@ -148,12 +272,14 @@ def make_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--kb", type=Path, required=True, help="Knowledge-base root containing audit/events.jsonl.")
     review_parser.add_argument("--review", type=Path, help="Review JSON to create; defaults to KB/review/review.json.")
     review_parser.add_argument("--from-review", type=Path, help="Carry forward only hash-identical reviewed projects and still-valid evidence records from a prior review.")
+    review_parser.add_argument("--membership-plan", type=Path, help="Evidence-bound project merge/split/reassignment JSON produced after reviewing proposed chains.")
 
     packet_parser = subparsers.add_parser("review-packet", help="Read one complete sanitized project chain or a hash-bound contiguous range.")
     packet_parser.add_argument("--kb", type=Path, required=True)
     packet_parser.add_argument("--project-key", required=True)
     packet_parser.add_argument("--start-event", type=int, default=0, help="Zero-based event index for a contiguous checkpoint range.")
     packet_parser.add_argument("--max-events", type=int, help="Maximum events to return; omit for the complete project chain.")
+    packet_parser.add_argument("--review", type=Path, help="Use the effective project membership stored in this review file.")
 
     validate_parser = subparsers.add_parser("validate-review", help="Validate review coverage and claim provenance without publishing.")
     validate_parser.add_argument("--kb", type=Path, required=True)
@@ -163,11 +289,70 @@ def make_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--kb", type=Path, required=True)
     distill_parser.add_argument("--review", type=Path, required=True)
 
-    verify_parser = subparsers.add_parser("verify-retrieval", help="Verify one relevant and one unrelated task before final completion.")
+    verify_parser = subparsers.add_parser("verify-retrieval", help="Verify a multi-case retrieval eval set, or a legacy relevant/unrelated pair.")
     verify_parser.add_argument("--kb", type=Path, required=True)
-    verify_parser.add_argument("--related-task", required=True, help="A task that must retrieve reviewed knowledge.")
-    verify_parser.add_argument("--unrelated-task", required=True, help="A task that must return no_match.")
+    verify_parser.add_argument("--eval-set", type=Path, help="Private JSON eval set with multiple related paraphrases and hard negatives.")
+    verify_parser.add_argument("--related-task", help="Legacy single task that must retrieve reviewed knowledge.")
+    verify_parser.add_argument("--unrelated-task", help="Legacy single task that must return no_match.")
     verify_parser.add_argument("--expected-project-key", help="Optional project key that the related task must select.")
+
+    clusters_parser = subparsers.add_parser("evolution-clusters", help="List exact evidence-bound feedback clusters without semantic invention.")
+    clusters_parser.add_argument("--review", type=Path, required=True)
+
+    propose_parser = subparsers.add_parser("evolution-propose", help="Add a non-active rule candidate from an Agent-reviewed proposal JSON.")
+    propose_parser.add_argument("--kb", type=Path, required=True)
+    propose_parser.add_argument("--review", type=Path, required=True)
+    propose_parser.add_argument("--proposal", type=Path, required=True)
+
+    queue_parser = subparsers.add_parser("evolution-queue", help="Show rule candidates awaiting a user decision.")
+    queue_parser.add_argument("--review", type=Path, required=True)
+
+    decide_parser = subparsers.add_parser("evolution-decide", help="Record an explicit approve/reject decision for one rule candidate.")
+    decide_parser.add_argument("--kb", type=Path, required=True)
+    decide_parser.add_argument("--review", type=Path, required=True)
+    decide_parser.add_argument("--evolution-id", required=True)
+    decide_parser.add_argument("--decision", choices=("approve", "reject"), required=True)
+    decide_parser.add_argument("--approval-event-id", action="append", default=[])
+    decide_parser.add_argument("--promoted-claim-id")
+    decide_parser.add_argument("--explicit-global-approval", action="store_true")
+
+    evaluate_parser = subparsers.add_parser("evolution-evaluate", help="Record a before/after behavior evaluation for an approved rule.")
+    evaluate_parser.add_argument("--kb", type=Path, required=True)
+    evaluate_parser.add_argument("--review", type=Path, required=True)
+    evaluate_parser.add_argument("--evolution-id", required=True)
+    evaluate_parser.add_argument("--result", choices=("passed", "failed", "mixed"), required=True)
+    evaluate_parser.add_argument("--baseline-event-id", action="append", default=[], required=True)
+    evaluate_parser.add_argument("--validation-event-id", action="append", default=[], required=True)
+    evaluate_parser.add_argument("--observed-change", default="")
+
+    golden_parser = subparsers.add_parser("golden-check", help="Run an isolated synthetic or user-held golden fixture manifest.")
+    golden_parser.add_argument("--fixture-root", type=Path, required=True)
+    golden_parser.add_argument("--manifest", type=Path, required=True)
+    golden_parser.add_argument("--output", type=Path, help="Optional isolated output directory; omit to use a temporary directory.")
+    golden_parser.add_argument("--adapter-dir", action="append", type=Path, default=[], help="Explicit trusted custom-adapter directory; repeatable.")
+
+    lifecycle_plan_parser = subparsers.add_parser("lifecycle-plan", help="Dry-run a retract, forget, or revalidation schedule against generated knowledge.")
+    lifecycle_plan_parser.add_argument("--kb", type=Path, required=True)
+    lifecycle_plan_parser.add_argument("--action", choices=("retract", "forget", "schedule"), required=True)
+    lifecycle_plan_parser.add_argument("--source-file-id", action="append", default=[])
+    lifecycle_plan_parser.add_argument("--event-id", action="append", default=[])
+    lifecycle_plan_parser.add_argument("--claim-id", action="append", default=[])
+    lifecycle_plan_parser.add_argument("--project-key", action="append", default=[])
+    lifecycle_plan_parser.add_argument("--reason", default="", help="Optional private reason; only its hash enters the plan.")
+    lifecycle_plan_parser.add_argument("--observed-at")
+    lifecycle_plan_parser.add_argument("--checked-at")
+    lifecycle_plan_parser.add_argument("--recheck-after")
+    lifecycle_plan_parser.add_argument("--retain-until")
+    lifecycle_plan_parser.add_argument("--plan", type=Path, help="Optional private plan file to create exclusively; otherwise print only.")
+
+    lifecycle_apply_parser = subparsers.add_parser("lifecycle-apply", help="Apply an unchanged state-bound lifecycle plan only with --commit.")
+    lifecycle_apply_parser.add_argument("--kb", type=Path, required=True)
+    lifecycle_apply_parser.add_argument("--plan", type=Path, required=True)
+    lifecycle_apply_parser.add_argument("--commit", action="store_true", help="Required explicit mutation switch; omitted means dry-run output only.")
+
+    lifecycle_due_parser = subparsers.add_parser("lifecycle-due", help="List due rechecks and retention expiries without claim bodies.")
+    lifecycle_due_parser.add_argument("--kb", type=Path, required=True)
+    lifecycle_due_parser.add_argument("--as-of", help="Optional ISO-8601 date/time; defaults to now.")
 
     release_parser = subparsers.add_parser("release-check", help="Fail closed if a public Skill source tree contains private, secret, binary, session, or generated artifacts.")
     release_parser.add_argument("--root", type=Path, required=True, help="Skill-pack source root to scan.")
@@ -209,13 +394,132 @@ def run(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.command == "lifecycle-plan":
+        plan = plan_lifecycle(
+            args.kb,
+            args.action,
+            source_file_ids=args.source_file_id,
+            event_ids=args.event_id,
+            claim_ids=args.claim_id,
+            project_keys=args.project_key,
+            reason=args.reason,
+            observed_at=args.observed_at,
+            checked_at=args.checked_at,
+            recheck_after=args.recheck_after,
+            retain_until=args.retain_until,
+        )
+        if args.plan:
+            _write_json_exclusive(args.plan, plan)
+        _json_print({**plan, **({"plan_file": str(args.plan.expanduser().resolve())} if args.plan else {})})
+        return 0
+    if args.command == "lifecycle-apply":
+        plan = json.loads(args.plan.expanduser().read_text(encoding="utf-8"))
+        result = apply_lifecycle_plan(args.kb, plan, commit=args.commit)
+        _json_print(result)
+        return 0
+    if args.command == "lifecycle-due":
+        _json_print(list_due_revalidations(args.kb, as_of=args.as_of))
+        return 0
+    if args.command == "evolution-clusters":
+        review = json.loads(args.review.expanduser().read_text(encoding="utf-8"))
+        clusters = feedback_clusters(review)
+        _json_print({"cluster_count": len(clusters), "clusters": clusters})
+        return 0
+    if args.command == "evolution-queue":
+        review = json.loads(args.review.expanduser().read_text(encoding="utf-8"))
+        _json_print(approval_queue(review))
+        return 0
+    if args.command == "evolution-propose":
+        review_path = args.review.expanduser()
+        proposal = json.loads(args.proposal.expanduser().read_text(encoding="utf-8"))
+        with mutation_lock(args.kb, "evolution-propose"):
+            review_path, review, _ = _load_review_for_evolution(args.kb, review_path)
+            result = propose_rule_evolution(review, proposal)
+            recheck = _write_validated_review_update(
+                args.kb,
+                review_path,
+                review,
+                result["review"],
+                operation="evolution-propose",
+                evolution_id=str(result["evolution"]["evolution_id"]),
+            )
+        _json_print({"status": "candidate-recorded", "evolution": result["evolution"], "cross_project_recheck": recheck})
+        return 0
+    if args.command == "evolution-decide":
+        review_path = args.review.expanduser()
+        with mutation_lock(args.kb, "evolution-decide"):
+            review_path, review, _ = _load_review_for_evolution(args.kb, review_path)
+            updated = decide_rule_evolution(
+                review,
+                args.evolution_id,
+                args.decision,
+                approval_event_ids=args.approval_event_id,
+                promoted_claim_id=args.promoted_claim_id,
+                explicit_global_approval=args.explicit_global_approval,
+            )
+            recheck = _write_validated_review_update(
+                args.kb,
+                review_path,
+                review,
+                updated,
+                operation="evolution-decide",
+                evolution_id=args.evolution_id,
+            )
+        _json_print(
+            {
+                "status": f"evolution-{args.decision}-recorded",
+                "evolution_id": args.evolution_id,
+                "cross_project_recheck": recheck,
+            }
+        )
+        return 0
+    if args.command == "evolution-evaluate":
+        review_path = args.review.expanduser()
+        with mutation_lock(args.kb, "evolution-evaluate"):
+            review_path, review, events = _load_review_for_evolution(args.kb, review_path)
+            updated = record_behavior_evaluation(
+                review,
+                args.evolution_id,
+                validation_result=args.result,
+                baseline_event_ids=args.baseline_event_id,
+                validation_event_ids=args.validation_event_id,
+                events=events,
+                observed_behavior_change=args.observed_change,
+            )
+            recheck = _write_validated_review_update(
+                args.kb,
+                review_path,
+                review,
+                updated,
+                operation="evolution-evaluate",
+                evolution_id=args.evolution_id,
+            )
+        _json_print(
+            {
+                "status": "behavior-evaluation-recorded",
+                "evolution_id": args.evolution_id,
+                "result": args.result,
+                "cross_project_recheck": recheck,
+            }
+        )
+        return 0
+    if args.command == "golden-check":
+        result = run_golden_manifest(_registry(args.adapter_dir), args.fixture_root, args.manifest, output_root=args.output)
+        _json_print(result)
+        return 0 if result["status"] == "passed" else 2
     if args.command == "review-init":
+        membership = None
+        if args.membership_plan:
+            membership_value = json.loads(args.membership_plan.expanduser().read_text(encoding="utf-8"))
+            membership = membership_value.get("project_membership", membership_value) if isinstance(membership_value, dict) else membership_value
+            if not isinstance(membership, dict):
+                raise ValueError("--membership-plan must contain a JSON object")
         with mutation_lock(args.kb, "review-init"):
-            result = create_review_template(args.kb, args.review, args.from_review)
+            result = create_review_template(args.kb, args.review, args.from_review, membership)
         _json_print(result)
         return 0
     if args.command == "review-packet":
-        _json_print(create_review_packet(args.kb, args.project_key, args.start_event, args.max_events))
+        _json_print(create_review_packet(args.kb, args.project_key, args.start_event, args.max_events, review_path=args.review))
         return 0
     if args.command == "validate-review":
         _, events, errors = validate_review(args.kb, args.review)
@@ -228,7 +532,15 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "verify-retrieval":
         with mutation_lock(args.kb, "verify-retrieval"):
-            result = verify_retrieval(args.kb, args.related_task, args.unrelated_task, args.expected_project_key)
+            if args.eval_set:
+                if args.related_task or args.unrelated_task or args.expected_project_key:
+                    raise ValueError("--eval-set cannot be combined with legacy related/unrelated arguments")
+                eval_set = json.loads(args.eval_set.expanduser().read_text(encoding="utf-8"))
+                result = verify_retrieval_suite(args.kb, eval_set)
+            else:
+                if not args.related_task or not args.unrelated_task:
+                    raise ValueError("use --eval-set, or provide both --related-task and --unrelated-task")
+                result = verify_retrieval(args.kb, args.related_task, args.unrelated_task, args.expected_project_key)
         _json_print(result)
         return 0 if result["status"] == "passed" else 2
     if args.command == "release-check":

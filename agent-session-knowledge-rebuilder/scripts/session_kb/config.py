@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 from .model import SourceFile
 from .locking import file_mutation_lock
-from .verification import publication_manifest
+from .verification import publication_manifest, require_publication_prerequisites, require_verified_retrieval_report
 
 
 REGISTRY_VERSION = 1
@@ -202,10 +202,14 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 def register_knowledge_base(name: str, kb: Path, registry_path: Path | None = None, make_default: bool = False) -> dict[str, Any]:
     safe_name = _safe_name(name)
     root = kb.expanduser().resolve()
+    if (root / "audit" / "lifecycle-transaction.json").exists():
+        raise ValueError("a lifecycle transaction is pending; resume it before registering the knowledge base")
     index_path = root / "knowledge" / "knowledge-index.json"
     if not index_path.is_file() and (root / "knowledge-index.json").is_file():
         index_path = root / "knowledge-index.json"
         root = root.parent if root.name == "knowledge" else root
+        if (root / "audit" / "lifecycle-transaction.json").exists():
+            raise ValueError("a lifecycle transaction is pending; resume it before registering the knowledge base")
     if not index_path.is_file():
         raise ValueError("knowledge-index.json not found; rebuild and publish the knowledge base first")
     index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -220,8 +224,16 @@ def register_knowledge_base(name: str, kb: Path, registry_path: Path | None = No
         raise ValueError("completion report and knowledge index belong to different evidence runs")
     if completion.get("status") not in {"complete", "complete_with_unsupported_formats"}:
         raise ValueError("knowledge base is not finally verified; run verify-retrieval before registration")
-    if gates.get("published_knowledge") is not True or gates.get("retrieval_related_match") is not True or gates.get("retrieval_unrelated_no_match") is not True:
-        raise ValueError("publication or retrieval verification gates are incomplete")
+    require_publication_prerequisites(completion)
+    retrieval_contract = int(completion.get("retrieval_contract_version") or 1)
+    if retrieval_contract >= 2:
+        if gates.get("retrieval_related_suite") is not True or gates.get("retrieval_hard_negative_suite") is not True:
+            raise ValueError("retrieval suite gates are incomplete")
+        if not str(completion.get("retrieval_suite_sha256") or ""):
+            raise ValueError("retrieval suite manifest is missing")
+        require_verified_retrieval_report(root, completion)
+    elif gates.get("retrieval_related_match") is not True or gates.get("retrieval_unrelated_no_match") is not True:
+        raise ValueError("legacy retrieval verification gates are incomplete")
     expected_manifest = str(completion.get("publication_manifest_sha256") or "")
     if not expected_manifest or publication_manifest(root, index)["sha256"] != expected_manifest:
         raise ValueError("published knowledge files do not match the verified publication manifest")

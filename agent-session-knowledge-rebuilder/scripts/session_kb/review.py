@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from .evolution_ops import behavior_evidence_order_errors
 from .model import UnifiedEvent
 from .render import _keywords, _slug
 from .sanitize import Sanitizer
@@ -83,6 +84,19 @@ CLAIM_ID_RE = re.compile(r"claim-[A-Za-z0-9][A-Za-z0-9._:-]{0,89}")
 ATTRIBUTION_ID_RE = re.compile(r"actor-[A-Za-z0-9][A-Za-z0-9._:-]{0,89}")
 FEEDBACK_ID_RE = re.compile(r"feedback-[A-Za-z0-9][A-Za-z0-9._:-]{0,86}")
 EVOLUTION_ID_RE = re.compile(r"evolution-[A-Za-z0-9][A-Za-z0-9._:-]{0,85}")
+MEMBERSHIP_ID_RE = re.compile(r"membership-[A-Za-z0-9][A-Za-z0-9._:-]{0,84}")
+PROJECT_KEY_RE = re.compile(r"(?:project|session):[A-Za-z0-9][A-Za-z0-9._:-]{0,119}")
+CHUNK_ID_RE = re.compile(r"chunk-[0-9a-f]{24}")
+MEMBERSHIP_OPERATIONS = {"merge", "split", "reassign"}
+MEMBERSHIP_EVIDENCE_BASES = {
+    "explicit-user-intent",
+    "continuation-lineage",
+    "objective-boundary",
+    "shared-artifact",
+    "observed-handoff",
+    "correction",
+    "role-context-review",
+}
 
 
 def _atomic_text(path: Path, text: str) -> None:
@@ -220,6 +234,427 @@ def _project_groups(events: list[UnifiedEvent]) -> dict[str, list[UnifiedEvent]]
     return dict(groups)
 
 
+def _project_manifest(groups: dict[str, list[UnifiedEvent]]) -> dict[str, Any]:
+    projects: list[dict[str, Any]] = []
+    for key in sorted(groups):
+        group = groups[key]
+        event_ids = [event.event_id for event in group]
+        projects.append(
+            {
+                "project_key": key,
+                "event_count": len(group),
+                "event_ids_sha256": _hash_ids(event_ids),
+                "event_set_sha256": _hash_events(group),
+            }
+        )
+    return {
+        "event_count": sum(len(group) for group in groups.values()),
+        "project_count": len(projects),
+        "projects": projects,
+    }
+
+
+def _assignment_partition_sha256(events: list[UnifiedEvent]) -> str:
+    digest = sha256()
+    for event in sorted(events, key=lambda item: item.event_id):
+        digest.update(_event_project_key(event).encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _derived_membership_operations(proposed: list[UnifiedEvent], effective: list[UnifiedEvent]) -> list[dict[str, Any]]:
+    proposed_key = {event.event_id: _event_project_key(event) for event in proposed}
+    effective_key = {event.event_id: _event_project_key(event) for event in effective}
+    event_ids = sorted(proposed_key)
+    operations: list[dict[str, Any]] = []
+    by_target: dict[str, set[str]] = defaultdict(set)
+    by_source: dict[str, set[str]] = defaultdict(set)
+    for event_id in event_ids:
+        by_target[effective_key[event_id]].add(proposed_key[event_id])
+        by_source[proposed_key[event_id]].add(effective_key[event_id])
+    for target, sources in sorted(by_target.items()):
+        if len(sources) >= 2:
+            operations.append(
+                {
+                    "operation": "merge",
+                    "source_project_keys": sorted(sources),
+                    "target_project_keys": [target],
+                    "event_ids": [event_id for event_id in event_ids if effective_key[event_id] == target],
+                }
+            )
+    for source, targets in sorted(by_source.items()):
+        if len(targets) >= 2:
+            operations.append(
+                {
+                    "operation": "split",
+                    "source_project_keys": [source],
+                    "target_project_keys": sorted(targets),
+                    "event_ids": [event_id for event_id in event_ids if proposed_key[event_id] == source],
+                }
+            )
+    reassign_pairs = sorted(
+        {
+            (proposed_key[event_id], effective_key[event_id])
+            for event_id in event_ids
+            if proposed_key[event_id] != effective_key[event_id]
+        }
+    )
+    for source, target in reassign_pairs:
+        operations.append(
+            {
+                "operation": "reassign",
+                "source_project_keys": [source],
+                "target_project_keys": [target],
+                "event_ids": [
+                    event_id
+                    for event_id in event_ids
+                    if proposed_key[event_id] == source and effective_key[event_id] == target
+                ],
+            }
+        )
+    return operations
+
+
+def _membership_plan(
+    events: list[UnifiedEvent],
+    membership_overrides: dict[str, Any] | None,
+    *,
+    require_audit: bool = False,
+) -> tuple[list[UnifiedEvent], dict[str, Any]]:
+    """Apply an evidence-bound review-layer project partition without changing audit/events.jsonl.
+
+    The supplied plan assigns only explicitly listed events. Unlisted events keep
+    their deterministic proposal. The returned audit object is canonical and
+    records both partitions plus the exact per-event diff.
+    """
+    supplied = membership_overrides if membership_overrides is not None else {}
+    if not isinstance(supplied, dict):
+        raise ValueError("project_membership must be an object")
+    override_version = supplied.get("override_version", 1)
+    if override_version != 1:
+        raise ValueError("project_membership.override_version must be 1")
+    raw_hash = _hash_events(events)
+    supplied_hash = str(supplied.get("basis_event_set_sha256") or "")
+    assignments = supplied.get("assignments", [])
+    if not isinstance(assignments, list):
+        raise ValueError("project_membership.assignments must be a list")
+    if assignments and supplied_hash != raw_hash:
+        raise ValueError("project_membership basis_event_set_sha256 is stale or missing")
+    if supplied_hash and supplied_hash != raw_hash:
+        raise ValueError("project_membership basis_event_set_sha256 is stale")
+
+    proposed_groups = _project_groups(events)
+    proposed_by_id = {event.event_id: event for event in events}
+    if len(proposed_by_id) != len(events):
+        raise ValueError("project membership cannot operate on duplicate event ids")
+    effective_key_by_id = {event.event_id: _event_project_key(event) for event in events}
+    seen_override_ids: set[str] = set()
+    assigned_event_ids: set[str] = set()
+    normalized_assignments: list[dict[str, Any]] = []
+
+    for assignment_index, assignment in enumerate(assignments):
+        location = f"project_membership.assignments[{assignment_index}]"
+        if not isinstance(assignment, dict):
+            raise ValueError(f"{location} must be an object")
+        override_id = str(assignment.get("override_id") or "")
+        if not MEMBERSHIP_ID_RE.fullmatch(override_id) or override_id in seen_override_ids:
+            raise ValueError(f"{location}.override_id must be a unique membership-* stable id")
+        seen_override_ids.add(override_id)
+        target_key = str(assignment.get("target_project_key") or "")
+        if not PROJECT_KEY_RE.fullmatch(target_key):
+            raise ValueError(f"{location}.target_project_key must be a stable project:* or session:* key")
+        rationale = str(assignment.get("rationale") or "").strip()
+        if not rationale:
+            raise ValueError(f"{location}.rationale is required")
+        operation = str(assignment.get("operation") or "")
+        if operation not in MEMBERSHIP_OPERATIONS:
+            raise ValueError(f"{location}.operation must be merge, split, or reassign")
+        evidence_basis = assignment.get("evidence_basis")
+        if (
+            not isinstance(evidence_basis, list)
+            or not evidence_basis
+            or any(str(item) not in MEMBERSHIP_EVIDENCE_BASES for item in evidence_basis)
+        ):
+            raise ValueError(f"{location}.evidence_basis is missing or unsupported")
+        sources = assignment.get("sources")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError(f"{location}.sources must be a non-empty list")
+        normalized_sources: list[dict[str, Any]] = []
+        assignment_event_ids: list[str] = []
+        source_keys: set[str] = set()
+        has_partial_source = False
+        for source_index, source in enumerate(sources):
+            source_location = f"{location}.sources[{source_index}]"
+            if not isinstance(source, dict):
+                raise ValueError(f"{source_location} must be an object")
+            proposed_key = str(source.get("proposed_project_key") or "")
+            proposed_group = proposed_groups.get(proposed_key)
+            if proposed_group is None:
+                raise ValueError(f"{source_location}.proposed_project_key is unknown")
+            if source.get("proposed_project_event_set_sha256") != _hash_events(proposed_group):
+                raise ValueError(f"{source_location}.proposed_project_event_set_sha256 is stale")
+            event_ids = source.get("event_ids")
+            if not isinstance(event_ids, list) or not event_ids or any(not isinstance(item, str) or not item for item in event_ids):
+                raise ValueError(f"{source_location}.event_ids must be a non-empty string list")
+            if len(set(event_ids)) != len(event_ids):
+                raise ValueError(f"{source_location}.event_ids contains duplicates")
+            source_order = {event.event_id: index for index, event in enumerate(proposed_group)}
+            if any(event_id not in source_order for event_id in event_ids):
+                raise ValueError(f"{source_location}.event_ids contains an event outside the proposed project")
+            if event_ids != sorted(event_ids, key=source_order.__getitem__):
+                raise ValueError(f"{source_location}.event_ids must preserve proposed project order")
+            selected = [proposed_by_id[event_id] for event_id in event_ids]
+            source_keys.add(proposed_key)
+            assignment_event_ids.extend(event_ids)
+            has_partial_source = has_partial_source or len(event_ids) < len(proposed_group)
+            if source.get("event_ids_sha256") != _hash_ids(event_ids):
+                raise ValueError(f"{source_location}.event_ids_sha256 is stale")
+            if source.get("event_set_sha256") != _hash_events(selected):
+                raise ValueError(f"{source_location}.event_set_sha256 is stale")
+            duplicates = assigned_event_ids.intersection(event_ids)
+            if duplicates:
+                raise ValueError(f"{source_location} reassigns an event already assigned by another override")
+            assigned_event_ids.update(event_ids)
+            for event_id in event_ids:
+                effective_key_by_id[event_id] = target_key
+            normalized_sources.append(
+                {
+                    "proposed_project_key": proposed_key,
+                    "proposed_project_event_set_sha256": _hash_events(proposed_group),
+                    "event_ids": list(event_ids),
+                    "event_ids_sha256": _hash_ids(event_ids),
+                    "event_set_sha256": _hash_events(selected),
+                }
+            )
+        if operation == "merge" and len(source_keys) < 2:
+            raise ValueError(f"{location}.operation=merge needs at least two proposed source projects")
+        if operation == "split" and not has_partial_source:
+            raise ValueError(f"{location}.operation=split needs a strict subset of a proposed project")
+        if operation == "reassign" and (len(source_keys) != 1 or target_key in source_keys):
+            raise ValueError(f"{location}.operation=reassign needs one differently named proposed source project")
+        evidence_event_ids = assignment.get("evidence_event_ids")
+        if (
+            not isinstance(evidence_event_ids, list)
+            or not evidence_event_ids
+            or len(set(str(item) for item in evidence_event_ids)) != len(evidence_event_ids)
+            or any(str(item) not in set(assignment_event_ids) for item in evidence_event_ids)
+        ):
+            raise ValueError(f"{location}.evidence_event_ids must be unique events inside this exact assignment")
+        evidence_events = [proposed_by_id[str(event_id)] for event_id in evidence_event_ids]
+        if assignment.get("evidence_event_set_sha256") != _hash_events(evidence_events):
+            raise ValueError(f"{location}.evidence_event_set_sha256 is stale")
+        if not any(event.role == "user" or event.evidence_grade in {"A", "B"} for event in evidence_events):
+            raise ValueError(f"{location}.evidence_event_ids need user-intent or observable grade-A/B evidence")
+        normalized_assignments.append(
+            {
+                "override_id": override_id,
+                "operation": operation,
+                "target_project_key": target_key,
+                "rationale": rationale,
+                "evidence_basis": [str(item) for item in evidence_basis],
+                "evidence_event_ids": [str(item) for item in evidence_event_ids],
+                "evidence_event_set_sha256": _hash_events(evidence_events),
+                "sources": normalized_sources,
+            }
+        )
+
+    effective_events = [UnifiedEvent.from_dict(event.to_dict()) for event in events]
+    for event in effective_events:
+        event.project_key = effective_key_by_id[event.event_id]
+    effective_groups = _project_groups(effective_events)
+    effective_ids = [event.event_id for group in effective_groups.values() for event in group]
+    if len(effective_ids) != len(events) or set(effective_ids) != set(proposed_by_id):
+        raise ValueError("project membership override lost or duplicated events")
+    diff = [
+        {
+            "event_id": event.event_id,
+            "event_set_sha256": _hash_events([event]),
+            "from_project_key": _event_project_key(event),
+            "to_project_key": effective_key_by_id[event.event_id],
+        }
+        for event in events
+        if _event_project_key(event) != effective_key_by_id[event.event_id]
+    ]
+    canonical = {
+        "override_version": 1,
+        "basis_event_set_sha256": raw_hash,
+        "proposal_assignment_sha256": _assignment_partition_sha256(events),
+        "result_assignment_sha256": _assignment_partition_sha256(effective_events),
+        "assignments": normalized_assignments,
+        "proposal": _project_manifest(proposed_groups),
+        "result": _project_manifest(effective_groups),
+        "diff": diff,
+        "operations": _derived_membership_operations(events, effective_events),
+    }
+    if require_audit and supplied != canonical:
+        raise ValueError("project_membership audit/diff is malformed or stale; regenerate it with review-init")
+    return effective_events, canonical
+
+
+def _rebase_prior_membership(events: list[UnifiedEvent], prior_membership: Any) -> dict[str, Any] | None:
+    """Rebind an unchanged explicit assignment to a new run without guessing about new events."""
+    if not isinstance(prior_membership, dict) or not prior_membership.get("assignments"):
+        return None
+    if prior_membership.get("override_version") != 1:
+        raise ValueError("prior project_membership has an unsupported override_version")
+    groups = _project_groups(events)
+    event_by_id = {event.event_id: event for event in events}
+    rebased_assignments: list[dict[str, Any]] = []
+    for assignment_index, assignment in enumerate(prior_membership.get("assignments") or []):
+        if not isinstance(assignment, dict):
+            raise ValueError(f"prior project_membership.assignments[{assignment_index}] is malformed")
+        rebased = {
+            key: _clone(assignment.get(key))
+            for key in (
+                "override_id",
+                "operation",
+                "target_project_key",
+                "rationale",
+                "evidence_basis",
+                "evidence_event_ids",
+            )
+        }
+        evidence_ids = [str(item) for item in assignment.get("evidence_event_ids") or []]
+        if any(event_id not in event_by_id for event_id in evidence_ids):
+            raise ValueError("prior project_membership evidence event is missing in the current frozen run")
+        evidence_events = [event_by_id[event_id] for event_id in evidence_ids]
+        if assignment.get("evidence_event_set_sha256") != _hash_events(evidence_events):
+            raise ValueError("prior project_membership evidence changed; explicit regrouping review is required")
+        rebased["evidence_event_set_sha256"] = _hash_events(evidence_events)
+        rebased_sources: list[dict[str, Any]] = []
+        for source_index, source in enumerate(assignment.get("sources") or []):
+            if not isinstance(source, dict):
+                raise ValueError(f"prior project_membership source {source_index} is malformed")
+            proposed_key = str(source.get("proposed_project_key") or "")
+            group = groups.get(proposed_key)
+            event_ids = [str(item) for item in source.get("event_ids") or []]
+            if group is None or not event_ids:
+                raise ValueError("prior project_membership source project no longer exists")
+            current_by_id = {event.event_id: event for event in group}
+            if any(event_id not in current_by_id for event_id in event_ids):
+                raise ValueError("prior project_membership assigned event moved or disappeared")
+            selected = [current_by_id[event_id] for event_id in event_ids]
+            if source.get("event_set_sha256") != _hash_events(selected):
+                raise ValueError("prior project_membership assigned event changed; explicit regrouping review is required")
+            rebased_sources.append(
+                {
+                    "proposed_project_key": proposed_key,
+                    "proposed_project_event_set_sha256": _hash_events(group),
+                    "event_ids": event_ids,
+                    "event_ids_sha256": _hash_ids(event_ids),
+                    "event_set_sha256": _hash_events(selected),
+                }
+            )
+        rebased["sources"] = rebased_sources
+        rebased_assignments.append(rebased)
+    return {
+        "override_version": 1,
+        "basis_event_set_sha256": _hash_events(events),
+        "assignments": rebased_assignments,
+    }
+
+
+def _range_receipt(
+    project_key: str,
+    group: list[UnifiedEvent],
+    start_event: int,
+    end_event: int,
+    *,
+    reading_mode: str = "fresh",
+    semantic_chunk_id: str | None = None,
+    carried_forward_from_run_id: str | None = None,
+) -> dict[str, Any]:
+    selected = group[start_event:end_event]
+    selected_ids = [event.event_id for event in selected]
+    boundary = group[max(0, start_event - 1) : min(len(group), end_event + 1)]
+    receipt = {
+        "receipt_version": 3,
+        "project_key": project_key,
+        "project_event_set_sha256": _hash_events(group),
+        "start_event": start_event,
+        "end_event_exclusive": end_event,
+        "slice_event_ids_sha256": _hash_ids(selected_ids),
+        "slice_event_set_sha256": _hash_events(selected),
+        "boundary_event_set_sha256": _hash_events(boundary),
+        "first_event_id": selected[0].event_id,
+        "last_event_id": selected[-1].event_id,
+        "previous_event_id": group[start_event - 1].event_id if start_event else None,
+        "next_event_id": group[end_event].event_id if end_event < len(group) else None,
+        "reading_mode": reading_mode,
+    }
+    if semantic_chunk_id:
+        receipt["semantic_chunk_id"] = semantic_chunk_id
+    if carried_forward_from_run_id:
+        receipt["carried_forward_from_run_id"] = carried_forward_from_run_id
+    return receipt
+
+
+def semantic_note_sha256(note: dict[str, Any]) -> str:
+    payload = {key: value for key, value in note.items() if key != "source_note_sha256"}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _semantic_chunk_id(project_key: str, start: int, end: int, selected_hash: str, boundary_hash: str) -> str:
+    return "chunk-" + sha256(
+        "\x00".join((project_key, str(start), str(end), selected_hash, boundary_hash)).encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _reopened_ranges(length: int, covered: list[tuple[int, int]]) -> list[dict[str, int]]:
+    reopened: list[dict[str, int]] = []
+    cursor = 0
+    for start, end in sorted(covered):
+        if start > cursor:
+            reopened.append({"start_event": cursor, "end_event_exclusive": start})
+        cursor = max(cursor, end)
+    if cursor < length:
+        reopened.append({"start_event": cursor, "end_event_exclusive": length})
+    return reopened
+
+
+def project_synthesis_sha256(project: dict[str, Any]) -> str:
+    """Bind a post-cache full-project synthesis to every publishable project conclusion."""
+    payload = {
+        field: project.get(field)
+        for field in (
+            "project_key",
+            "event_count",
+            "event_ids_sha256",
+            "event_set_sha256",
+            "title",
+            "aliases",
+            "semantic_status",
+            "default_disposition",
+            "rationale",
+            "event_exceptions",
+            "reading_receipts",
+            "semantic_chunks",
+            "link_analysis",
+            "completion",
+            "history",
+        )
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def cross_project_state_sha256(review: dict[str, Any]) -> str:
+    payload = {
+        "project_membership": review.get("project_membership"),
+        "projects": review.get("projects"),
+        "actor_attributions": review.get("actor_attributions"),
+        "base_claims": review.get("base_claims"),
+        "feedback_signals": review.get("feedback_signals"),
+        "rule_evolutions": review.get("rule_evolutions"),
+        "project_relationships": review.get("project_relationships"),
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _clone(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
 
@@ -230,7 +665,7 @@ def _event_project_key(event: UnifiedEvent) -> str:
 
 def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: list[UnifiedEvent]) -> dict[str, Any]:
     prior = json.loads(prior_path.expanduser().read_text(encoding="utf-8"))
-    if prior.get("review_version") not in {2, 3}:
+    if prior.get("review_version") not in {2, 3, 4}:
         raise ValueError("prior review has an unsupported review_version")
     prior_reviewer = prior.get("reviewer") if isinstance(prior.get("reviewer"), dict) else {}
     if not str(prior_reviewer.get("attestation") or "").strip():
@@ -242,10 +677,17 @@ def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: 
         for item in prior.get("projects") or []
         if isinstance(item, dict) and item.get("project_key")
     }
+    current_groups = _project_groups(events)
     carried_keys: set[str] = set()
+    partially_reused_keys: set[str] = set()
+    carried_chunk_count = 0
     for key, current in current_projects.items():
         previous = prior_projects.get(key)
         if not previous or previous.get("semantic_status") not in PROJECT_STATUSES:
+            continue
+        if prior.get("review_version") != 4:
+            # v2/v3 remains directly validatable, but its id-only packet
+            # receipts cannot be silently upgraded to v4 semantic receipts.
             continue
         if not isinstance(previous.get("completion"), dict):
             # Review v3 introduced a machine-checked completion ladder. A
@@ -262,6 +704,8 @@ def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: 
             "rationale",
             "event_exceptions",
             "reading_receipts",
+            "semantic_chunks",
+            "project_synthesis",
             "link_analysis",
             "completion",
             "history",
@@ -270,6 +714,106 @@ def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: 
                 current[field] = _clone(previous[field])
         current["carried_forward_from_run_id"] = prior.get("run_id")
         carried_keys.add(key)
+
+    if prior.get("review_version") == 4:
+        prior_run_id = str(prior.get("run_id") or "")
+        for key, current in current_projects.items():
+            if key in carried_keys:
+                continue
+            previous = prior_projects.get(key)
+            group = current_groups.get(key) or []
+            if not previous or previous.get("semantic_status") not in PROJECT_STATUSES or not group:
+                continue
+            reusable: list[dict[str, Any]] = []
+            occupied: list[tuple[int, int]] = []
+            for chunk in sorted(
+                (item for item in previous.get("semantic_chunks") or [] if isinstance(item, dict)),
+                key=lambda item: (int(item.get("start_event", -1)), int(item.get("end_event_exclusive", -1))),
+            ):
+                start = chunk.get("start_event")
+                end = chunk.get("end_event_exclusive")
+                chunk_id = str(chunk.get("chunk_id") or "")
+                if (
+                    not isinstance(start, int)
+                    or isinstance(start, bool)
+                    or not isinstance(end, int)
+                    or isinstance(end, bool)
+                    or start < 0
+                    or end <= start
+                    or end > len(group)
+                    or not CHUNK_ID_RE.fullmatch(chunk_id)
+                    or any(start < old_end and end > old_start for old_start, old_end in occupied)
+                ):
+                    continue
+                selected = group[start:end]
+                selected_ids = [event.event_id for event in selected]
+                boundary_hash = _hash_events(group[max(0, start - 1) : min(len(group), end + 1)])
+                notes = chunk.get("notes")
+                if (
+                    chunk.get("event_ids_sha256") != _hash_ids(selected_ids)
+                    or chunk.get("event_set_sha256") != _hash_events(selected)
+                    or chunk.get("boundary_event_set_sha256") != boundary_hash
+                    or chunk_id != _semantic_chunk_id(key, start, end, _hash_events(selected), boundary_hash)
+                    or chunk.get("first_event_id") != selected[0].event_id
+                    or chunk.get("last_event_id") != selected[-1].event_id
+                    or chunk.get("previous_event_id") != (group[start - 1].event_id if start else None)
+                    or chunk.get("next_event_id") != (group[end].event_id if end < len(group) else None)
+                    or not isinstance(notes, list)
+                    or not notes
+                    or not str(chunk.get("reviewed_at") or "").strip()
+                    or not str(chunk.get("attestation") or "").strip()
+                ):
+                    continue
+                selected_id_set = set(selected_ids)
+                valid_notes = True
+                for note in notes:
+                    evidence_ids = note.get("evidence_event_ids") if isinstance(note, dict) else None
+                    if (
+                        not isinstance(note, dict)
+                        or not str(note.get("text") or "").strip()
+                        or note.get("status") not in HISTORY_ITEM_STATUSES
+                        or not isinstance(evidence_ids, list)
+                        or not evidence_ids
+                        or any(str(event_id) not in selected_id_set for event_id in evidence_ids)
+                        or note.get("source_note_sha256") != semantic_note_sha256(note)
+                    ):
+                        valid_notes = False
+                        break
+                if not valid_notes:
+                    continue
+                carried = _clone(chunk)
+                carried["reading_mode"] = "carried-semantic-chunk"
+                carried["carried_forward_from_run_id"] = prior_run_id
+                reusable.append(carried)
+                occupied.append((start, end))
+            if not reusable:
+                continue
+            current["semantic_chunks"] = reusable
+            current["reading_receipts"] = [
+                _range_receipt(
+                    key,
+                    group,
+                    int(chunk["start_event"]),
+                    int(chunk["end_event_exclusive"]),
+                    reading_mode="carried-semantic-chunk",
+                    semantic_chunk_id=str(chunk["chunk_id"]),
+                    carried_forward_from_run_id=prior_run_id,
+                )
+                for chunk in reusable
+            ]
+            current["project_synthesis"] = {
+                "status": "pending",
+                "mode": "fresh",
+                "project_event_set_sha256": _hash_events(group),
+                "synthesis_sha256": "",
+                "reviewed_at": "",
+                "attestation": "",
+                "rationale": "",
+                "reused_chunk_ids": [str(chunk["chunk_id"]) for chunk in reusable],
+                "reopened_ranges": _reopened_ranges(len(group), occupied),
+            }
+            partially_reused_keys.add(key)
+            carried_chunk_count += len(reusable)
 
     event_by_id = {event.event_id: event for event in events}
 
@@ -346,16 +890,27 @@ def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: 
         "relationship_count": len(relationships),
         "feedback_signal_count": len(feedback_signals),
         "rule_evolution_count": len(evolutions),
-        "requires_cross_project_recheck": True,
+        "chunk_count": carried_chunk_count,
+        "partially_reused_project_keys": sorted(partially_reused_keys),
+        "requires_cross_project_recheck": bool(carried_keys or partially_reused_keys),
         "invalidated_project_keys": sorted(set(current_projects) - carried_keys),
     }
     return template["carry_forward"]
 
 
-def create_review_template(kb: Path, destination: Path | None = None, prior_review: Path | None = None) -> dict[str, Any]:
+def create_review_template(
+    kb: Path,
+    destination: Path | None = None,
+    prior_review: Path | None = None,
+    membership_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     root = _kb_root(kb)
     completion = json.loads((root / "audit" / "completion-report.json").read_text(encoding="utf-8"))
-    events = _events(root)
+    raw_events = _events(root)
+    if membership_overrides is None and prior_review is not None:
+        prior_value = json.loads(prior_review.expanduser().read_text(encoding="utf-8"))
+        membership_overrides = _rebase_prior_membership(raw_events, prior_value.get("project_membership"))
+    events, project_membership = _membership_plan(raw_events, membership_overrides)
     groups = _project_groups(events)
     projects: list[dict[str, Any]] = []
     for key in sorted(groups):
@@ -375,16 +930,29 @@ def create_review_template(kb: Path, destination: Path | None = None, prior_revi
                 "rationale": "",
                 "event_exceptions": [],
                 "reading_receipts": [],
+                "semantic_chunks": [],
+                "project_synthesis": {
+                    "status": "not-required",
+                    "mode": "fresh",
+                    "project_event_set_sha256": _hash_events(group),
+                    "synthesis_sha256": "",
+                    "reviewed_at": "",
+                    "attestation": "",
+                    "rationale": "",
+                    "reused_chunk_ids": [],
+                    "reopened_ranges": [],
+                },
                 "link_analysis": {"status": "unreviewed", "rationale": ""},
                 "completion": {"level": "unreviewed", "status": "unverified", "evidence_event_ids": [], "rationale": ""},
                 "history": {section: [] for section in HISTORY_SECTIONS},
             }
         )
     template = {
-        "review_version": 3,
+        "review_version": 4,
         "run_id": completion.get("run_id"),
-        "event_count": len(events),
-        "event_set_sha256": _hash_events(events),
+        "event_count": len(raw_events),
+        "event_set_sha256": _hash_events(raw_events),
+        "project_membership": project_membership,
         "reviewer": {
             "id": "",
             "reviewed_at": "",
@@ -404,19 +972,35 @@ def create_review_template(kb: Path, destination: Path | None = None, prior_revi
             "relationship_count": 0,
             "feedback_signal_count": 0,
             "rule_evolution_count": 0,
+            "chunk_count": 0,
+            "partially_reused_project_keys": [],
             "requires_cross_project_recheck": False,
             "invalidated_project_keys": sorted(groups),
         },
         "cross_project_recheck": {
-            "required": False,
+            "required": bool(project_membership["diff"]),
             "completed": False,
             "reviewed_at": "",
             "rationale": "",
+            "checked_state_sha256": "",
         },
         "instructions": {
             "semantic_status": "Set every project to reviewed or reviewed-no-knowledge after reading its complete ordered event chain.",
             "history_item": {"text": "A bounded assertion", "evidence_event_ids": ["evt-..."], "status": "observed"},
             "reading_receipt": "Copy the receipt object from every contiguous review-packet range. Receipts must cover 0..event_count without gaps or overlap.",
+            "semantic_chunk": {
+                "chunk_id": "Copy the stable chunk id from review-packet",
+                "start_event": 0,
+                "end_event_exclusive": 10,
+                "event_ids_sha256": "hash from review-packet",
+                "event_set_sha256": "full semantic hash from review-packet",
+                "first_event_id": "evt-...",
+                "last_event_id": "evt-...",
+                "notes": [{"text": "Evidence-bound observation from this exact range", "evidence_event_ids": ["evt-..."], "status": "observed", "source_note_sha256": "semantic_note_sha256(note)"}],
+                "reviewed_at": "timestamp",
+                "attestation": "This exact range was read semantically",
+            },
+            "project_synthesis": "When any semantic chunk is carried, reread every reopened range, synthesize the complete current chain, and set status=completed with the current project hash, project_synthesis_sha256, date, attestation, and rationale.",
             "base_claim": {
                 "claim_id": "claim-stable-id",
                 "knowledge_type": "identity|direction|collaboration|expression|evidence_rule",
@@ -497,7 +1081,7 @@ def create_review_template(kb: Path, destination: Path | None = None, prior_revi
     carry_summary = template["carry_forward"]
     if prior_review is not None:
         carry_summary = _seed_review_from_prior(template, prior_review, events)
-        if carry_summary.get("project_count"):
+        if carry_summary.get("project_count") or carry_summary.get("chunk_count"):
             template["cross_project_recheck"]["required"] = True
     target = destination.expanduser() if destination else root / "review" / "review.json"
     if destination is None and target.exists():
@@ -511,6 +1095,11 @@ def create_review_template(kb: Path, destination: Path | None = None, prior_revi
         "projects": len(projects),
         "events": len(events),
         "run_id": template["run_id"],
+        "project_membership": {
+            "changed_events": len(project_membership["diff"]),
+            "proposed_projects": project_membership["proposal"]["project_count"],
+            "effective_projects": project_membership["result"]["project_count"],
+        },
         "carried_forward": carry_summary,
     }
 
@@ -520,10 +1109,20 @@ def create_review_packet(
     project_key: str,
     start_event: int = 0,
     max_events: int | None = None,
+    membership_overrides: dict[str, Any] | None = None,
+    review_path: Path | None = None,
 ) -> dict[str, Any]:
     """Return a complete chain or one hash-bound contiguous range for semantic reading."""
     root = _kb_root(kb)
-    events = _events(root)
+    raw_events = _events(root)
+    if membership_overrides is not None and review_path is not None:
+        raise ValueError("supply membership_overrides or review_path, not both")
+    require_audit = False
+    if review_path is not None:
+        review = json.loads(review_path.expanduser().read_text(encoding="utf-8"))
+        membership_overrides = review.get("project_membership")
+        require_audit = True
+    events, project_membership = _membership_plan(raw_events, membership_overrides, require_audit=require_audit)
     groups = _project_groups(events)
     key = str(project_key).strip()
     if key not in groups:
@@ -537,29 +1136,46 @@ def create_review_packet(
     selected = group[start_event:end_event]
     event_ids = [event.event_id for event in group]
     selected_ids = [event.event_id for event in selected]
-    receipt = {
-        "project_key": key,
-        "project_event_set_sha256": _hash_events(group),
-        "start_event": start_event,
-        "end_event_exclusive": end_event,
-        "slice_event_ids_sha256": _hash_ids(selected_ids),
-        "first_event_id": selected[0].event_id,
-        "last_event_id": selected[-1].event_id,
-    }
+    receipt = _range_receipt(key, group, start_event, end_event)
+    boundary_hash = _hash_events(group[max(0, start_event - 1) : min(len(group), end_event + 1)])
+    chunk_id = _semantic_chunk_id(key, start_event, end_event, _hash_events(selected), boundary_hash)
+    proposed_key_by_id = {event.event_id: _event_project_key(event) for event in raw_events}
     return {
-        "packet_version": 2,
+        "packet_version": 3,
         "project_key": key,
         "project_label": next((event.project_label for event in group if event.project_label), None) or key,
         "event_count": len(group),
         "event_ids_sha256": _hash_ids(event_ids),
         "event_set_sha256": _hash_events(group),
-        "ordered_events": [event.to_dict() for event in selected],
+        "project_membership_basis_sha256": project_membership["basis_event_set_sha256"],
+        "ordered_events": [
+            {**event.to_dict(), "proposed_project_key": proposed_key_by_id[event.event_id]}
+            for event in selected
+        ],
         "receipt": receipt,
+        "semantic_chunk": {
+            "chunk_id": chunk_id,
+            "start_event": start_event,
+            "end_event_exclusive": end_event,
+            "event_ids_sha256": _hash_ids(selected_ids),
+            "event_set_sha256": _hash_events(selected),
+            "boundary_event_set_sha256": boundary_hash,
+            "first_event_id": selected[0].event_id,
+            "last_event_id": selected[-1].event_id,
+            "previous_event_id": group[start_event - 1].event_id if start_event else None,
+            "next_event_id": group[end_event].event_id if end_event < len(group) else None,
+            "notes": [],
+            "reviewed_at": "",
+            "attestation": "",
+            "reading_mode": "fresh",
+        },
         "range": {
             "start_event": start_event,
             "end_event_exclusive": end_event,
             "returned_event_count": len(selected),
             "slice_event_ids_sha256": _hash_ids(selected_ids),
+            "slice_event_set_sha256": _hash_events(selected),
+            "boundary_event_set_sha256": boundary_hash,
             "previous_event_id": group[start_event - 1].event_id if start_event else None,
             "first_event_id": selected[0].event_id if selected else None,
             "last_event_id": selected[-1].event_id if selected else None,
@@ -570,7 +1186,7 @@ def create_review_packet(
         "review_focus": list(HISTORY_SECTIONS),
         "checkpoint_rule": (
             "Ranges must be contiguous and non-overlapping. Resume at next_start_event, verify previous/next boundary ids, "
-            "and attest only after cumulative returned_event_count equals event_count and the full event_ids_sha256 matches the review template."
+            "record evidence-bound semantic_chunk notes, and attest only after cumulative returned_event_count equals event_count and both id and semantic hashes match."
         ),
         "relationship_rule": (
             "After this chain is reviewed, compare its objective, corrections, artifacts, dependencies, handoffs, and contradictions with other reviewed chains. "
@@ -632,20 +1248,39 @@ def _effective_actor(
     return event.actor_kind
 
 
-def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[UnifiedEvent], list[str]]:
+def validate_review(
+    kb: Path,
+    review_path: Path,
+    *,
+    allow_pending_cross_project_recheck: bool = False,
+) -> tuple[dict[str, Any], list[UnifiedEvent], list[str]]:
     root = _kb_root(kb)
     review = json.loads(review_path.expanduser().read_text(encoding="utf-8"))
-    events = _events(root)
-    event_by_id = {event.event_id: event for event in events}
-    groups = _project_groups(events)
+    raw_events = _events(root)
     completion = json.loads((root / "audit" / "completion-report.json").read_text(encoding="utf-8"))
     errors: list[str] = []
-    if review.get("review_version") not in {2, 3}:
+    review_version = review.get("review_version")
+    if review_version not in {2, 3, 4}:
         errors.append("unsupported review_version")
+    if review_version == 4:
+        try:
+            events, membership_audit = _membership_plan(raw_events, review.get("project_membership"), require_audit=True)
+        except ValueError as exc:
+            errors.append(str(exc))
+            events = [UnifiedEvent.from_dict(event.to_dict()) for event in raw_events]
+            membership_audit = {"diff": []}
+    else:
+        if review.get("project_membership"):
+            errors.append("project_membership requires review_version 4")
+        events = [UnifiedEvent.from_dict(event.to_dict()) for event in raw_events]
+        membership_audit = {"diff": []}
+    membership_changed = bool(membership_audit.get("diff"))
+    event_by_id = {event.event_id: event for event in events}
+    groups = _project_groups(events)
     if review.get("run_id") != completion.get("run_id"):
         errors.append("review run_id does not match the frozen evidence run")
-    expected_event_hash = _hash_events(events) if review.get("review_version") == 3 else _hash_ids([event.event_id for event in events])
-    if review.get("event_count") != len(events) or review.get("event_set_sha256") != expected_event_hash:
+    expected_event_hash = _hash_events(raw_events) if review_version in {3, 4} else _hash_ids([event.event_id for event in raw_events])
+    if review.get("event_count") != len(raw_events) or review.get("event_set_sha256") != expected_event_hash:
         errors.append("review event set does not match audit/events.jsonl")
     for gate in ("frozen_snapshot", "transport_accounted", "parse_clean", "discovery_coverage_complete"):
         if not completion.get("gates", {}).get(gate):
@@ -681,21 +1316,70 @@ def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[U
     declared_carried_count = int(carry_forward.get("project_count") or 0)
     if declared_carried_count != len(carried_projects):
         errors.append("carry_forward.project_count does not match actual carried project markers")
-    carried_source_runs = set(carried_projects.values())
-    if carried_projects:
+    partial_chunks: list[tuple[str, dict[str, Any]]] = []
+    for key, project in project_by_key.items():
+        if key in carried_projects:
+            continue
+        for chunk in project.get("semantic_chunks") or []:
+            if isinstance(chunk, dict) and chunk.get("reading_mode") == "carried-semantic-chunk":
+                partial_chunks.append((key, chunk))
+    partially_reused_keys = {key for key, _ in partial_chunks}
+    declared_chunk_count = int(carry_forward.get("chunk_count") or 0)
+    if review_version == 4 and declared_chunk_count != len(partial_chunks):
+        errors.append("carry_forward.chunk_count does not match actual carried semantic chunks")
+    if review_version == 4 and sorted(str(item) for item in carry_forward.get("partially_reused_project_keys") or []) != sorted(partially_reused_keys):
+        errors.append("carry_forward.partially_reused_project_keys does not match actual chunk reuse")
+    carried_source_runs = set(carried_projects.values()) | {
+        str(chunk.get("carried_forward_from_run_id") or "") for _, chunk in partial_chunks
+    }
+    has_reuse = bool(carried_projects or partial_chunks)
+    if has_reuse:
         if len(carried_source_runs) != 1 or str(carry_forward.get("source_run_id") or "") not in carried_source_runs:
-            errors.append("carry_forward.source_run_id does not match actual carried project markers")
+            errors.append("carry_forward.source_run_id does not match actual carried project/chunk markers")
         if carry_forward.get("requires_cross_project_recheck") is not True:
             errors.append("carry_forward summary must require cross-project recheck")
         expected_invalidated = sorted(set(groups) - set(carried_projects))
         if sorted(str(item) for item in carry_forward.get("invalidated_project_keys") or []) != expected_invalidated:
             errors.append("carry_forward.invalidated_project_keys does not match the current carried set")
-        if cross_project_recheck.get("required") is not True or cross_project_recheck.get("completed") is not True:
-            errors.append("carried-forward review requires a completed cross_project_recheck")
-        if not str(cross_project_recheck.get("reviewed_at") or "").strip() or not str(cross_project_recheck.get("rationale") or "").strip():
-            errors.append("cross_project_recheck requires reviewed_at and rationale")
+    if has_reuse or membership_changed:
+        if cross_project_recheck.get("required") is not True:
+            errors.append("carried-forward review requires a cross_project_recheck")
+        recheck_pending = cross_project_recheck.get("completed") is not True
+        if recheck_pending:
+            pending_mutations = cross_project_recheck.get("pending_evolution_mutations")
+            valid_pending_mutations = isinstance(pending_mutations, list) and bool(pending_mutations)
+            if valid_pending_mutations:
+                for item in pending_mutations:
+                    if (
+                        not isinstance(item, dict)
+                        or item.get("operation") not in {"evolution-propose", "evolution-decide", "evolution-evaluate"}
+                        or not EVOLUTION_ID_RE.fullmatch(str(item.get("evolution_id") or ""))
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("state_sha256") or ""))
+                    ):
+                        valid_pending_mutations = False
+                        break
+            valid_reopen = (
+                cross_project_recheck.get("reopen_reason") == "evolution-state-changed"
+                and isinstance(cross_project_recheck.get("reopen_count"), int)
+                and not isinstance(cross_project_recheck.get("reopen_count"), bool)
+                and int(cross_project_recheck.get("reopen_count") or 0) > 0
+                and valid_pending_mutations
+                and str(pending_mutations[-1].get("state_sha256") or "") == cross_project_state_sha256(review)
+                and not str(cross_project_recheck.get("reviewed_at") or "").strip()
+                and not str(cross_project_recheck.get("rationale") or "").strip()
+                and not str(cross_project_recheck.get("checked_state_sha256") or "").strip()
+            )
+            if not allow_pending_cross_project_recheck or not valid_reopen:
+                errors.append("carried-forward review requires a completed cross_project_recheck")
+            if allow_pending_cross_project_recheck and not valid_reopen:
+                errors.append("pending cross_project_recheck lacks a valid evolution-mutation reopen record")
+        else:
+            if not str(cross_project_recheck.get("reviewed_at") or "").strip() or not str(cross_project_recheck.get("rationale") or "").strip():
+                errors.append("cross_project_recheck requires reviewed_at and rationale")
+            if cross_project_recheck.get("checked_state_sha256") != cross_project_state_sha256(review):
+                errors.append("cross_project_recheck.checked_state_sha256 does not bind the current reviewed state")
     elif carry_forward.get("requires_cross_project_recheck") is True or cross_project_recheck.get("required") is True:
-        errors.append("cross-project recheck cannot be required without actual carried projects")
+        errors.append("cross-project recheck cannot be required without actual carried projects or semantic chunks")
     for key, group in groups.items():
         project = project_by_key.get(key)
         if project is None:
@@ -703,18 +1387,19 @@ def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[U
         event_ids = [event.event_id for event in group]
         project_hash_matches = (
             project.get("event_set_sha256") == _hash_events(group)
-            if review.get("review_version") == 3
+            if review_version in {3, 4}
             else project.get("event_ids_sha256") == _hash_ids(event_ids)
         )
         if project.get("event_count") != len(group) or not project_hash_matches:
             errors.append(f"project {key}: event set hash/count mismatch")
-        if review.get("review_version") == 3 and project.get("event_ids_sha256") != _hash_ids(event_ids):
+        if review_version in {3, 4} and project.get("event_ids_sha256") != _hash_ids(event_ids):
             errors.append(f"project {key}: ordered event-id hash mismatch")
-        if review.get("review_version") == 3:
+        if review_version in {3, 4}:
             receipts = project.get("reading_receipts") if isinstance(project.get("reading_receipts"), list) else []
             if not receipts:
                 errors.append(f"project {key}: reading_receipts must cover the complete project chain")
             cursor = 0
+            carried_receipt_ids: set[str] = set()
             for receipt_index, receipt in enumerate(
                 sorted(
                     receipts,
@@ -743,11 +1428,125 @@ def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[U
                     errors.append(f"{location}: receipt belongs to another project event set")
                 if receipt.get("slice_event_ids_sha256") != _hash_ids(selected_ids):
                     errors.append(f"{location}: slice hash mismatch")
+                if review_version == 4 and receipt.get("slice_event_set_sha256") != _hash_events(selected):
+                    errors.append(f"{location}: semantic slice hash mismatch")
+                if review_version == 4 and receipt.get("boundary_event_set_sha256") != _hash_events(
+                    group[max(0, start - 1) : min(len(group), end + 1)]
+                ):
+                    errors.append(f"{location}: semantic boundary hash mismatch")
                 if receipt.get("first_event_id") != selected[0].event_id or receipt.get("last_event_id") != selected[-1].event_id:
                     errors.append(f"{location}: boundary event ids do not match")
+                if review_version == 4 and (
+                    receipt.get("previous_event_id") != (group[start - 1].event_id if start else None)
+                    or receipt.get("next_event_id") != (group[end].event_id if end < len(group) else None)
+                ):
+                    errors.append(f"{location}: adjacent boundary event ids do not match")
+                if review_version == 4:
+                    reading_mode = receipt.get("reading_mode")
+                    if reading_mode not in {"fresh", "carried-semantic-chunk"}:
+                        errors.append(f"{location}: reading_mode must be fresh or carried-semantic-chunk")
+                    if reading_mode == "carried-semantic-chunk":
+                        semantic_chunk_id = str(receipt.get("semantic_chunk_id") or "")
+                        if not CHUNK_ID_RE.fullmatch(semantic_chunk_id) or not str(receipt.get("carried_forward_from_run_id") or "").strip():
+                            errors.append(f"{location}: carried receipt needs semantic_chunk_id and source run id")
+                        else:
+                            carried_receipt_ids.add(semantic_chunk_id)
+                    elif receipt.get("semantic_chunk_id") or receipt.get("carried_forward_from_run_id"):
+                        errors.append(f"{location}: fresh receipt must not claim carried chunk metadata")
                 cursor = end
             if receipts and cursor != len(group):
                 errors.append(f"project {key}: reading_receipts do not reach the final event")
+        if review_version == 4:
+            semantic_chunks = project.get("semantic_chunks") if isinstance(project.get("semantic_chunks"), list) else []
+            seen_chunk_ids: set[str] = set()
+            chunk_ranges: list[tuple[int, int]] = []
+            carried_ids: set[str] = set()
+            carried_ranges: list[tuple[int, int]] = []
+            for chunk_index, chunk in enumerate(semantic_chunks):
+                location = f"project {key} semantic_chunks[{chunk_index}]"
+                if not isinstance(chunk, dict):
+                    errors.append(f"{location}: chunk is not an object")
+                    continue
+                chunk_id = str(chunk.get("chunk_id") or "")
+                if not CHUNK_ID_RE.fullmatch(chunk_id) or chunk_id in seen_chunk_ids:
+                    errors.append(f"{location}: chunk_id must be a unique stable chunk hash")
+                seen_chunk_ids.add(chunk_id)
+                start = chunk.get("start_event")
+                end = chunk.get("end_event_exclusive")
+                if (
+                    not isinstance(start, int)
+                    or isinstance(start, bool)
+                    or not isinstance(end, int)
+                    or isinstance(end, bool)
+                    or start < 0
+                    or end <= start
+                    or end > len(group)
+                ):
+                    errors.append(f"{location}: invalid contiguous range")
+                    continue
+                if any(start < old_end and end > old_start for old_start, old_end in chunk_ranges):
+                    errors.append(f"{location}: semantic chunk ranges overlap")
+                chunk_ranges.append((start, end))
+                selected = group[start:end]
+                selected_ids = [event.event_id for event in selected]
+                boundary_hash = _hash_events(group[max(0, start - 1) : min(len(group), end + 1)])
+                if chunk.get("event_ids_sha256") != _hash_ids(selected_ids) or chunk.get("event_set_sha256") != _hash_events(selected):
+                    errors.append(f"{location}: chunk hashes are stale")
+                if chunk.get("boundary_event_set_sha256") != boundary_hash:
+                    errors.append(f"{location}: chunk boundary hash is stale")
+                if chunk_id != _semantic_chunk_id(key, start, end, _hash_events(selected), boundary_hash):
+                    errors.append(f"{location}: chunk_id does not bind the current range and boundaries")
+                if chunk.get("first_event_id") != selected[0].event_id or chunk.get("last_event_id") != selected[-1].event_id:
+                    errors.append(f"{location}: chunk boundaries are stale")
+                if (
+                    chunk.get("previous_event_id") != (group[start - 1].event_id if start else None)
+                    or chunk.get("next_event_id") != (group[end].event_id if end < len(group) else None)
+                ):
+                    errors.append(f"{location}: chunk adjacent boundaries are stale")
+                notes = chunk.get("notes")
+                if not isinstance(notes, list) or not notes:
+                    errors.append(f"{location}: semantic chunk needs evidence-bound notes")
+                    notes = []
+                selected_id_set = set(selected_ids)
+                for note_index, note in enumerate(notes):
+                    note_location = f"{location}.notes[{note_index}]"
+                    if not isinstance(note, dict) or not str(note.get("text") or "").strip():
+                        errors.append(f"{note_location}: note needs non-empty text")
+                        continue
+                    if note.get("status") not in HISTORY_ITEM_STATUSES:
+                        errors.append(f"{note_location}: invalid note status")
+                    evidence_ids = note.get("evidence_event_ids")
+                    if not isinstance(evidence_ids, list) or not evidence_ids or any(str(item) not in selected_id_set for item in evidence_ids):
+                        errors.append(f"{note_location}: evidence must stay inside this exact chunk")
+                    if note.get("source_note_sha256") != semantic_note_sha256(note):
+                        errors.append(f"{note_location}: source_note_sha256 does not bind the note")
+                if not str(chunk.get("reviewed_at") or "").strip() or not str(chunk.get("attestation") or "").strip():
+                    errors.append(f"{location}: reviewed_at and attestation are required")
+                if chunk.get("reading_mode") == "carried-semantic-chunk":
+                    if not str(chunk.get("carried_forward_from_run_id") or "").strip():
+                        errors.append(f"{location}: carried chunk needs a source run id")
+                    carried_ids.add(chunk_id)
+                    carried_ranges.append((start, end))
+            if carried_ids or carried_receipt_ids:
+                if carried_receipt_ids != carried_ids:
+                    errors.append(f"project {key}: carried chunks and carried reading receipts do not match")
+            if carried_ids:
+                synthesis = project.get("project_synthesis") if isinstance(project.get("project_synthesis"), dict) else {}
+                if synthesis.get("status") != "completed":
+                    errors.append(f"project {key}: carried chunks require completed full project_synthesis")
+                if synthesis.get("mode") != "fresh":
+                    errors.append(f"project {key}: project_synthesis.mode must be fresh after chunk reuse")
+                if synthesis.get("project_event_set_sha256") != _hash_events(group):
+                    errors.append(f"project {key}: project_synthesis hash is stale")
+                if sorted(str(item) for item in synthesis.get("reused_chunk_ids") or []) != sorted(carried_ids):
+                    errors.append(f"project {key}: project_synthesis.reused_chunk_ids does not match actual carried chunks")
+                if synthesis.get("reopened_ranges") != _reopened_ranges(len(group), carried_ranges):
+                    errors.append(f"project {key}: project_synthesis.reopened_ranges does not match the exact cache complement")
+                if synthesis.get("synthesis_sha256") != project_synthesis_sha256(project):
+                    errors.append(f"project {key}: project_synthesis.synthesis_sha256 does not bind final project conclusions")
+                for field in ("reviewed_at", "attestation", "rationale"):
+                    if not str(synthesis.get(field) or "").strip():
+                        errors.append(f"project {key}: project_synthesis.{field} is required after chunk reuse")
         status = project.get("semantic_status")
         if status not in PROJECT_STATUSES:
             errors.append(f"project {key}: semantic_status must be reviewed or reviewed-no-knowledge")
@@ -1146,6 +1945,13 @@ def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[U
                 validation_events.append(event)
                 if project_by_key.get(_event_project_key(event), {}).get("semantic_status") != "reviewed":
                     errors.append(f"{location}: validation evidence belongs to a project not published as reviewed knowledge")
+        if (
+            baseline_ids
+            and validation_ids
+            and all(str(event_id) in event_by_id for event_id in list(baseline_ids) + list(validation_ids))
+        ):
+            for chronology_error in behavior_evidence_order_errors(events, baseline_ids, validation_ids):
+                errors.append(f"{location}: {chronology_error}")
         if status == "validated":
             if validation_result != "passed":
                 errors.append(f"{location}: validated evolution requires validation_result=passed")
@@ -1245,6 +2051,7 @@ def validate_review(kb: Path, review_path: Path) -> tuple[dict[str, Any], list[U
     if _sensitive_review_text(
         {
             "reviewer": reviewer,
+            "project_membership": review.get("project_membership"),
             "actor_attributions": attributions,
             "base_claims": claims,
             "feedback_signals": feedback_signals,
@@ -1824,6 +2631,7 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
     _json_write(root / "audit" / "actor-attributions.json", list(review.get("actor_attributions") or []))
     _json_write(root / "audit" / "feedback-signals.json", feedback_signals)
     _json_write(root / "audit" / "rule-evolutions.json", rule_evolutions)
+    _json_write(root / "audit" / "project-membership.json", review.get("project_membership") or {})
     _json_write(root / "audit" / "relationships.json", graph_edges)
     _json_write(root / "audit" / "relationship-candidates.json", relationship_candidates)
     _json_write(root / "audit" / "link-audit.json", link_audit)
@@ -1840,9 +2648,14 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
     completion = json.loads((root / "audit" / "completion-report.json").read_text(encoding="utf-8"))
     has_unsupported = not completion.get("gates", {}).get("unsupported_formats_clear")
     completion["status"] = "needs_retrieval_verification"
+    completion["retrieval_contract_version"] = 2
     completion["gates"]["semantic_review_complete"] = True
     completion["gates"]["knowledge_graph_complete"] = True
     completion["gates"]["published_knowledge"] = True
+    completion["gates"]["retrieval_related_match"] = False
+    completion["gates"]["retrieval_unrelated_no_match"] = False
+    completion["gates"]["retrieval_related_suite"] = False
+    completion["gates"]["retrieval_hard_negative_suite"] = False
     completion["gates"]["unsupported_formats_acknowledged"] = bool(review.get("unsupported_formats_acknowledged"))
     completion["semantic_dispositions"] = len(semantic_rows)
     completion["published_claims"] = len(claims)
@@ -1854,10 +2667,16 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
     completion["rule_evolutions"] = len(rule_evolutions)
     completion["validated_rule_evolutions"] = validated_evolutions
     completion["evolution_status"] = evolution_status
+    completion["project_membership_changed_events"] = len((review.get("project_membership") or {}).get("diff") or [])
     completion["has_unsupported_formats"] = has_unsupported
     completion["reviewer"] = review["reviewer"]
     completion["distilled_at"] = datetime.now(timezone.utc).isoformat()
     completion.pop("completed_at", None)
+    completion.pop("retrieval_verified_at", None)
+    completion.pop("retrieval_suite_sha256", None)
+    completion.pop("retrieval_verification_sha256", None)
+    completion.pop("retrieval_profile", None)
+    completion.pop("publication_manifest_sha256", None)
     _json_write(root / "audit" / "completion-report.json", completion)
     return {
         "status": completion["status"],

@@ -165,12 +165,20 @@ def main() -> int:
             failures.append({"case": name, "check": "adapter_counts", "expected": sorted(expectation["adapters"]), "actual": sorted(stats.get("adapter_counts") or {})})
         if completion.get("status") != "complete" or index.get("semantic_status") != "published":
             failures.append({"case": name, "check": "publication_gate", "completion": completion.get("status"), "index": index.get("semantic_status")})
+        if (
+            completion.get("retrieval_contract_version") != 2
+            or not completion.get("retrieval_suite_sha256")
+            or not completion.get("retrieval_verification_sha256")
+        ):
+            failures.append({"case": name, "check": "retrieval_suite_contract"})
         for gate in (
             "semantic_review_complete",
             "knowledge_graph_complete",
             "published_knowledge",
             "retrieval_related_match",
             "retrieval_unrelated_no_match",
+            "retrieval_related_suite",
+            "retrieval_hard_negative_suite",
         ):
             if completion.get("gates", {}).get(gate) is not True:
                 failures.append({"case": name, "check": "semantic_gate", "gate": gate})
