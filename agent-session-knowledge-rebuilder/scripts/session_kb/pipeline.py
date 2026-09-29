@@ -463,17 +463,20 @@ def _transport_disposition(
     }
 
 
-def _self_reconstruction_sessions(events: list[UnifiedEvent], output_dir: Path) -> set[tuple[str, str]]:
+def _mentions_self_reconstruction(content: str, output_dir: Path) -> bool:
     try:
         absolute = str(output_dir.expanduser().resolve())
     except (OSError, RuntimeError):
         absolute = str(output_dir.expanduser())
     markers = {absolute, display_path(output_dir)}
     workflow_markers = ("session_kb.py", "audit/events.jsonl", "completion-report.json", "review/review.json", "review-init", "validate-review")
+    return any(marker and marker in content for marker in markers) and any(marker in content for marker in workflow_markers)
+
+
+def _self_reconstruction_sessions(events: list[UnifiedEvent], output_dir: Path) -> set[tuple[str, str]]:
     sessions: set[tuple[str, str]] = set()
     for event in events:
-        content = event.content
-        if any(marker and marker in content for marker in markers) and any(marker in content for marker in workflow_markers):
+        if _mentions_self_reconstruction(event.content, output_dir):
             sessions.add((event.source_agent, event.session_id))
     return sessions
 
@@ -558,6 +561,7 @@ def build_knowledge_base(
     source_state: dict[str, Any] = {}
     retained_previous = [] if schema_policy_changed else list(previous_events)
     new_events: list[UnifiedEvent] = []
+    raw_self_reconstruction_sessions: set[tuple[str, str]] = set()
     excluded: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "excluded.jsonl") if incremental and not schema_policy_changed else []
     errors: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "errors.jsonl") if incremental and not schema_policy_changed else []
     dispositions: list[dict[str, Any]] = _load_jsonl_dicts(output_dir / "audit" / "dispositions.jsonl") if incremental and not schema_policy_changed else []
@@ -713,6 +717,8 @@ def build_knowledge_base(
                 )
             )
         for raw in parsed.events:
+            if _mentions_self_reconstruction(str(raw.content), output_dir):
+                raw_self_reconstruction_sessions.add((source.agent_name, raw.session_id))
             event, exclusion_reason = _normalize_raw_event(raw, source, sanitizer, project_identities)
             if exclusion_reason:
                 excluded.append({"source_file_id": source.source_file_id, "record_locator": raw.record_locator, "reason": exclusion_reason})
@@ -796,7 +802,7 @@ def build_knowledge_base(
     counters["transport_records_unaccounted"] = sum(int(item.get("transport_records_unaccounted", 0)) for item in source_state.values())
 
     combined = retained_previous + new_events
-    self_sessions = _self_reconstruction_sessions(combined, output_dir)
+    self_sessions = raw_self_reconstruction_sessions | _self_reconstruction_sessions(combined, output_dir)
     if self_sessions:
         filtered: list[UnifiedEvent] = []
         for event in combined:
@@ -1056,7 +1062,7 @@ def build_knowledge_base(
     }
     completion = previous_completion if preserve_published else {
         "report_version": 2,
-        "retrieval_contract_version": 2,
+        "retrieval_contract_version": 3,
         "run_id": run_id,
         "status": "needs_semantic_review",
         "gates": {

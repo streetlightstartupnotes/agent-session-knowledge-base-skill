@@ -10,13 +10,14 @@ from typing import Any
 
 from .query import load_validated_graph, query_knowledge
 from .sanitize import Sanitizer
+from .context_units import RETRIEVAL_ENGINE_VERSION, selection_options
 
 
 RELATED_GATE = "retrieval_related_match"
 UNRELATED_GATE = "retrieval_unrelated_no_match"
 RELATED_SUITE_GATE = "retrieval_related_suite"
 HARD_NEGATIVE_SUITE_GATE = "retrieval_hard_negative_suite"
-RETRIEVAL_CONTRACT_VERSION = 2
+RETRIEVAL_CONTRACT_VERSION = 3
 MIN_RELATED_CASES = 2
 MIN_HARD_NEGATIVE_CASES = 2
 DEFAULT_RETRIEVAL_PROFILE = {"min_score": 4, "max_projects": 3, "max_related": 2}
@@ -91,7 +92,7 @@ def require_publication_prerequisites(completion: dict[str, Any]) -> None:
 def require_verified_retrieval_report(root: Path, completion: dict[str, Any]) -> dict[str, Any]:
     """Bind a final v0.5 completion to its complete multi-case audit report."""
 
-    if int(completion.get("retrieval_contract_version") or 1) < RETRIEVAL_CONTRACT_VERSION:
+    if int(completion.get("retrieval_contract_version") or 1) < 2:
         return {}
     report_path = root.expanduser().resolve() / "audit" / "retrieval-verification.json"
     if not report_path.is_file():
@@ -102,13 +103,22 @@ def require_verified_retrieval_report(root: Path, completion: dict[str, Any]) ->
         raise ValueError("retrieval suite audit report does not match the verified completion")
     if (
         report.get("report_version") != 2
-        or int(report.get("retrieval_contract_version") or 0) != RETRIEVAL_CONTRACT_VERSION
+        or int(report.get("retrieval_contract_version") or 0) not in {2, 3}
+        or report.get("retrieval_contract_version") != completion.get("retrieval_contract_version")
         or report.get("run_id") != completion.get("run_id")
         or report.get("status") != "passed"
         or report.get("suite_sha256") != completion.get("retrieval_suite_sha256")
     ):
         raise ValueError("retrieval suite audit metadata is invalid")
     profile = report.get("retrieval_profile")
+    if report.get("retrieval_contract_version") == 3 and "retrieval_engine_version" not in report:
+        raise ValueError("retrieval contract 3 requires an engine and selection binding")
+    if "retrieval_engine_version" in report:
+        if (report["retrieval_engine_version"] != RETRIEVAL_ENGINE_VERSION
+                or completion.get("retrieval_engine_version") != RETRIEVAL_ENGINE_VERSION
+                or selection_options(report.get("selection_options")) != report.get("selection_options")
+                or report.get("selection_options") != completion.get("selection_options")):
+            raise ValueError("retrieval engine or selection options changed; rerun the suite")
     if (
         not isinstance(profile, dict)
         or set(profile) != set(DEFAULT_RETRIEVAL_PROFILE)
@@ -242,6 +252,7 @@ def _normalize_eval_cases(eval_set: dict[str, Any]) -> tuple[list[dict[str, Any]
         ),
     }
     normalized: list[dict[str, Any]] = []
+    selection = selection_options(eval_set.get("selection_options"))
     seen_hashes: set[str] = set()
     for position, raw in enumerate(cases):
         if not isinstance(raw, dict):
@@ -249,7 +260,7 @@ def _normalize_eval_cases(eval_set: dict[str, Any]) -> tuple[list[dict[str, Any]
         kind = str(raw.get("kind") or "").strip().lower().replace("-", "_")
         if kind not in {"related", "hard_negative"}:
             raise ValueError(f"retrieval eval case {position} has unsupported kind")
-        per_case_query_fields = sorted(set(raw) & set(DEFAULT_RETRIEVAL_PROFILE))
+        per_case_query_fields = sorted(set(raw) & (set(DEFAULT_RETRIEVAL_PROFILE) | set(selection)))
         if per_case_query_fields:
             raise ValueError(
                 f"retrieval eval case {position} cannot override the suite retrieval profile: {', '.join(per_case_query_fields)}"
@@ -275,6 +286,9 @@ def _normalize_eval_cases(eval_set: dict[str, Any]) -> tuple[list[dict[str, Any]
                 "task_redactions": redactions,
                 "expected_project_keys": expected_projects,
                 "expected_document_types": expected_types,
+                "min_context_units": _bounded_int(raw.get("min_context_units"),
+                    default=1 if kind == "related" and selection["view"] != "documents" else 0,
+                    minimum=0, maximum=1000, label="min_context_units"),
                 "min_project_matches": _bounded_int(
                     raw.get("min_project_matches"),
                     default=default_project_matches,
@@ -289,6 +303,7 @@ def _normalize_eval_cases(eval_set: dict[str, Any]) -> tuple[list[dict[str, Any]
 
 
 def _suite_case_summary(case: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    context_count = sum(len(item.get("units", [])) for item in result.get("documents", []))
     selected_projects = sorted(
         {
             str(document.get("project_key"))
@@ -305,12 +320,22 @@ def _suite_case_summary(case: dict[str, Any], result: dict[str, Any]) -> dict[st
     )
     expected_projects = set(case["expected_project_keys"])
     expected_types = set(case["expected_document_types"])
+    documents = result.get("documents") or []
+    # Each declared target must supply its own evidence. Graph neighbours cannot
+    # compensate for unavailable facts/current state in the expected project.
+    target_counts = [sum(len(d.get("units", [])) for d in documents if d.get("project_key") == key)
+                     for key in sorted(expected_projects)]
+    target_counts.extend(sum(len(d.get("units", [])) for d in documents if d.get("type") == kind)
+                         for kind in sorted(expected_types))
+    if not target_counts:
+        target_counts = [sum(len(d.get("units", [])) for d in documents if not d.get("relationship") and d.get("type") != "evidence")]
     if case["kind"] == "related":
         passed = (
             result.get("match_status") == "matched"
             and int(result.get("project_matches") or 0) >= int(case["min_project_matches"])
             and expected_projects.issubset(set(selected_projects))
             and expected_types.issubset(set(selected_types))
+            and all(count >= case["min_context_units"] for count in target_counts)
         )
     else:
         passed = result.get("match_status") == "no_match" and int(result.get("project_matches") or 0) == 0
@@ -328,6 +353,11 @@ def _suite_case_summary(case: dict[str, Any], result: dict[str, Any]) -> dict[st
         "expected_project_key_sha256": [_task_fingerprint(item) for item in sorted(expected_projects)],
         "expected_document_types": sorted(expected_types),
         "min_project_matches": int(case["min_project_matches"]),
+        "min_context_units": case["min_context_units"],
+        "context_unit_count": context_count,
+        "minimum_target_context_units": min(target_counts),
+        "returned_content_chars": sum(len(item.get("content", "")) + item.get("returned_chars", 0)
+                                      for item in result.get("documents", [])),
         "query_parameters": {
             "min_score": int(case["min_score"]),
             "max_projects": int(case["max_projects"]),
@@ -358,6 +388,7 @@ def verify_retrieval_suite(
     require_publication_prerequisites(completion)
 
     cases, retrieval_profile = _normalize_eval_cases(eval_set)
+    selection = selection_options(eval_set.get("selection_options"))
     related_count = sum(case["kind"] == "related" for case in cases)
     negative_count = sum(case["kind"] == "hard_negative" for case in cases)
     if related_count < minimum_related:
@@ -372,9 +403,10 @@ def verify_retrieval_suite(
             root,
             case["task"],
             max_projects=case["max_projects"],
-            emit_content=False,
+            emit_content=selection["view"] != "documents",
             min_score=case["min_score"],
             max_related=case["max_related"],
+            **selection,
         )
         summaries.append(_suite_case_summary(case, result))
 
@@ -392,11 +424,13 @@ def verify_retrieval_suite(
             "expected_project_key_sha256": item["expected_project_key_sha256"],
             "expected_document_types": item["expected_document_types"],
             "min_project_matches": item["min_project_matches"],
+            "min_context_units": item["min_context_units"],
             "query_parameters": item["query_parameters"],
         }
         for item in summaries
     ]
-    suite_sha256 = _canonical_sha256({"retrieval_profile": retrieval_profile, "cases": suite_fingerprint_payload})
+    suite_sha256 = _canonical_sha256({"retrieval_profile": retrieval_profile, "cases": suite_fingerprint_payload,
+                                     "selection_options": selection, "retrieval_engine_version": RETRIEVAL_ENGINE_VERSION})
     verified_at = datetime.now(timezone.utc).isoformat()
     report = {
         "report_version": 2,
@@ -406,6 +440,8 @@ def verify_retrieval_suite(
         "verified_at": verified_at,
         "suite_sha256": suite_sha256,
         "retrieval_profile": retrieval_profile,
+        "selection_options": selection,
+        "retrieval_engine_version": RETRIEVAL_ENGINE_VERSION,
         "case_counts": {
             "total": len(summaries),
             "related": related_count,
@@ -431,6 +467,8 @@ def verify_retrieval_suite(
     completion["retrieval_contract_version"] = RETRIEVAL_CONTRACT_VERSION
     completion["retrieval_suite_sha256"] = suite_sha256
     completion["retrieval_profile"] = retrieval_profile
+    completion["selection_options"] = selection
+    completion["retrieval_engine_version"] = RETRIEVAL_ENGINE_VERSION
     completion["retrieval_verification_sha256"] = _canonical_sha256(report)
     completion["status"] = final_status
     completion["retrieval_verification_attempted_at"] = verified_at
@@ -481,7 +519,7 @@ def verify_retrieval(
         related_match = related_match and expected_match
     unrelated_no_match = unrelated_result.get("match_status") == "no_match"
     pair_passed = related_match and unrelated_no_match
-    requires_suite = int(completion.get("retrieval_contract_version") or 1) >= RETRIEVAL_CONTRACT_VERSION
+    requires_suite = int(completion.get("retrieval_contract_version") or 1) >= 2
     passed = pair_passed and not requires_suite
     has_unsupported = completion.get("gates", {}).get("unsupported_formats_clear") is not True
     final_status = (
@@ -516,6 +554,8 @@ def verify_retrieval(
     gates[UNRELATED_GATE] = unrelated_no_match
     completion["status"] = final_status
     completion["retrieval_verification_attempted_at"] = report["verified_at"]
+    completion["retrieval_engine_version"] = RETRIEVAL_ENGINE_VERSION
+    completion["selection_options"] = selection_options()
     completion["publication_manifest_sha256"] = manifest["sha256"]
     if passed:
         completion["retrieval_verified_at"] = report["verified_at"]

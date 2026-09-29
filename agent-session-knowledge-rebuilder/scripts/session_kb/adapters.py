@@ -376,6 +376,16 @@ class ClackyJSONAdapter(SessionAdapter):
                 continue
             timestamp = message.get("timestamp") or root_time
             content = _message_text(message.get("content"))
+            attachment_types = sorted(
+                {
+                    str(block.get("type") or "attachment")
+                    for block in (message.get("content") or [])
+                    if isinstance(block, dict)
+                    and str(block.get("type") or "").lower() in {"attachment", "file", "image", "image_url", "input_image"}
+                }
+            ) if isinstance(message.get("content"), list) else []
+            if not content and attachment_types:
+                content = _json_text({"attachment_types": attachment_types, "count": len(message.get("content") or [])})
             if content:
                 sequence += 1
                 result.events.append(
@@ -385,7 +395,7 @@ class ClackyJSONAdapter(SessionAdapter):
                         record_locator=locator,
                         timestamp=timestamp,
                         role=role if role in {"user", "assistant", "tool"} else "unknown",
-                        event_type="tool_result" if role == "tool" else "message",
+                        event_type="attachment" if attachment_types else ("tool_result" if role == "tool" else "message"),
                         content=content,
                         call_id=message.get("tool_call_id"),
                         working_dir=working_dir,
@@ -447,6 +457,8 @@ class ClackyChunkAdapter(SessionAdapter):
         text = head.decode("utf-8", errors="ignore")
         if self.heading.search(text):
             return 95, "Clacky User/Assistant chunk"
+        if self.embedded_marker.search(text):
+            return 90, "Clacky tool-only chunk"
         return 20, "chunk filename without visible headings"
 
     def parse(self, data: bytes, source: SourceFile, context: dict[str, Any] | None = None) -> ParseResult:
@@ -456,7 +468,44 @@ class ClackyChunkAdapter(SessionAdapter):
         session_id = frontmatter_session.group(1) if frontmatter_session else _session_from_filename(Path(re.sub(r"-chunk-\d+(?=\.md$)", "", str(source.path))))
         matches = list(self.heading.finditer(text))
         if not matches:
-            result.errors.append({"record_locator": "document", "error": "chunk_headings_missing"})
+            tool_markers = list(self.embedded_marker.finditer(text))
+            if not tool_markers:
+                result.errors.append({"record_locator": "document", "error": "chunk_headings_missing"})
+                return result
+            if tool_markers[0].start() > 0 and text[: tool_markers[0].start()].strip():
+                result.excluded.append({"record_locator": "preamble", "reason": "chunk_summary_or_metadata"})
+            sequence = 0
+            for marker_index, embedded in enumerate(tool_markers):
+                next_start = tool_markers[marker_index + 1].start() if marker_index + 1 < len(tool_markers) else len(text)
+                if embedded.group("call") is not None:
+                    content = embedded.group("call").strip().strip("_")
+                    if content.lower().startswith("tool calls:"):
+                        content = content.split(":", 1)[1].strip()
+                    role = "assistant"
+                    event_type = "tool_call"
+                    tool_name = "clacky-embedded-tools"
+                else:
+                    content = text[embedded.end() : next_start].strip()
+                    role = "tool"
+                    event_type = "tool_result"
+                    tool_name = str(embedded.group("result") or "tool").strip()
+                if not content:
+                    continue
+                sequence += 1
+                result.records_seen += 1
+                result.events.append(
+                    RawEvent(
+                        session_id=session_id,
+                        sequence=sequence,
+                        record_locator=f"document.part:{marker_index + 1}",
+                        role=role,
+                        event_type=event_type,
+                        content=content,
+                        tool_name=tool_name,
+                        metadata={"transport_lane": "clacky-chunk"},
+                    )
+                )
+            result.context = {"session_id": session_id, "sequence": sequence}
             return result
         if matches[0].start() > 0 and text[: matches[0].start()].strip():
             result.excluded.append({"record_locator": "preamble", "reason": "chunk_summary_or_metadata"})

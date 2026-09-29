@@ -12,7 +12,21 @@ from pathlib import Path
 from typing import Any
 
 
-SANITIZER_POLICY_VERSION = 4
+SANITIZER_POLICY_VERSION = 7
+
+# Shared with release checking. Unknown, unlabelled secrets still require review;
+# a matching-looking prefix is not evidence that a service accepts a credential.
+VENDOR_KEY_RE = re.compile(r"\b(?:ark-|apikey_)[A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
+PROXY_LOGIN_RE = re.compile(r"\b(?:ss|ssr|vmess|vless|trojan|hysteria2?|hy2|tuic)://[^\s<>`\"']+", re.IGNORECASE)
+LABELED_SECRET_RE = re.compile(
+    r"(?i)(?<![A-Za-z])(?:api[ _-]?key|password|passwd|密码|口令|密钥)"
+    r"\s*(?:[:：=]|是|为)\s*[`\"']?(?!\[REDACTED:)([A-Za-z0-9!@#$%^&*._~+/=-]{4,})"
+)
+NATIONAL_ID_RE = re.compile(
+    r"(?<![A-Za-z0-9])[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?![A-Za-z0-9])"
+)
+ENCRYPTED_TEXT_FIELD_RE = re.compile(r'"encrypted_content"\s*:\s*"[^"\\]*(?:\\.[^"\\]*)*"')
+EXPLICIT_REASONING_RE = re.compile(r"<think\b[^>]*>.*?(?:</think>|\Z)", re.IGNORECASE | re.DOTALL)
 
 
 DATA_URL_RE = re.compile(
@@ -35,8 +49,14 @@ COOKIE_JAR_RE = re.compile(
 COOKIE_ASSIGNMENT_RE = re.compile(
     rf"(?<![A-Za-z0-9-])['\"]?(?:sessionid|csrftoken|(?i:csrf[_-]?token|jsessionid|phpsessid|connect\.sid))['\"]?\s*[:=]\s*(?:['\"][^'\"\r\n]{{8,}}['\"]|[^\s,'\";}}\]]{{8,}})"
 )
+TERMINAL_STDIN_SECRET_RE = re.compile(
+    r'''(?is)(\bwrite_stdin\s*\(\s*\{(?:(?!\}\s*\)).){0,1024}?\b["']?chars["']?\s*:\s*["'])([A-Za-z0-9!@#$%^&*._~+=/-]{12,})(\\n["'])'''
+)
 
 CREDENTIAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("VENDOR_KEY", VENDOR_KEY_RE),
+    ("PROXY_LOGIN", PROXY_LOGIN_RE),
+    ("LABELED_SECRET", LABELED_SECRET_RE),
     ("GITHUB_TOKEN", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")),
     ("OPENAI_KEY", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")),
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
@@ -67,6 +87,7 @@ IPV6_CANDIDATE_RE = re.compile(
 )
 UNIX_HOME_PATH_RE = re.compile(r"(?P<prefix>/(?:Users|home)/)(?P<name>[^/\\\s\"'<>]+)")
 WINDOWS_HOME_PATH_RE = re.compile(r"(?i)(?P<prefix>\b[A-Z]:[\\/]+Users[\\/]+)(?P<name>[^/\\\s\"'<>]+)")
+MACOS_TEMP_PATH_RE = re.compile(r"/(?:private/)?var/folders/[^\s\"'<>]+")
 
 RUNTIME_MARKERS = (
     "<environment_context>",
@@ -98,6 +119,7 @@ IMPORTED_TRANSCRIPT_MARKERS = (
     "begin external transcript",
 )
 COMPACTION_MARKERS = (
+    "this session is being continued from a previous conversation that ran out of context.",
     "[compressed conversation summary",
     "<summary>",
     "## previous session archives",
@@ -138,6 +160,7 @@ def _valid_base64(compact: str) -> bool:
 class Sanitizer:
     def __init__(self) -> None:
         self.stats: Counter[str] = Counter()
+        self.terminal_input_secrets: set[str] = set()
 
     def _binary_placeholder(self, raw: str, kind: str) -> str:
         compact = re.sub(r"\s+", "", raw)
@@ -250,6 +273,20 @@ class Sanitizer:
             except (TypeError, ValueError):
                 value = str(value)
         text = value.replace("\x00", "[NUL]")
+        def redact_opaque_field(match: re.Match) -> str:
+            # Some exports put visible delegated messages in this field. A field
+            # name alone cannot prove encryption; never decrypt opaque strings.
+            try:
+                raw = json.loads("{" + match.group(0) + "}")["encrypted_content"]
+            except (ValueError, TypeError, KeyError):
+                return match.group(0)
+            if re.fullmatch(r"[A-Za-z0-9_+/=\-]+", raw):
+                self.stats["opaque_fields_removed"] += 1
+                return '"encrypted_content":"[OPAQUE_FIELD_REMOVED]"'
+            return match.group(0)
+        text = ENCRYPTED_TEXT_FIELD_RE.sub(redact_opaque_field, text)
+        text, count = EXPLICIT_REASONING_RE.subn("[EXPLICIT_REASONING_REMOVED]", text)
+        self.stats["reasoning_spans_removed"] += count
         home_values = {str(Path.home())}
         if os.environ.get("USERPROFILE"):
             home_values.add(os.environ["USERPROFILE"])
@@ -257,12 +294,25 @@ class Sanitizer:
             text = self._replace_known_home(text, home_value)
         text = WINDOWS_HOME_PATH_RE.sub(self._replace_foreign_home, text)
         text = UNIX_HOME_PATH_RE.sub(self._replace_foreign_home, text)
+        text, count = MACOS_TEMP_PATH_RE.subn("[REDACTED:TEMP_PATH]", text)
+        self.stats["temp_path_redactions"] += count
         text = DATA_URL_RE.sub(self._replace_data_url, text)
         text = self._replace_wrapped_base64(text)
         text = BASE64_TOKEN_RE.sub(self._replace_base64, text)
+        terminal_matches = list(TERMINAL_STDIN_SECRET_RE.finditer(text))
+        self.terminal_input_secrets.update(match.group(2) for match in terminal_matches)
+        text, count = TERMINAL_STDIN_SECRET_RE.subn(r"\1[REDACTED:TERMINAL_INPUT]\3", text)
+        self.stats["credential_redactions"] += count
+        for terminal_secret in sorted(self.terminal_input_secrets, key=len, reverse=True):
+            count = text.count(terminal_secret)
+            if count:
+                text = text.replace(terminal_secret, "[REDACTED:TERMINAL_INPUT]")
+                self.stats["credential_redactions"] += count
         for label, pattern in CREDENTIAL_PATTERNS:
             text, count = pattern.subn(f"[REDACTED:{label}]", text)
             self.stats["credential_redactions"] += count
+        text, count = NATIONAL_ID_RE.subn("[REDACTED:NATIONAL_ID]", text)
+        self.stats["national_id_redactions"] += count
         text, count = EMAIL_RE.subn("[REDACTED:EMAIL]", text)
         self.stats["email_redactions"] += count
         text, count = PHONE_RE.subn("[REDACTED:PHONE]", text)
@@ -302,10 +352,12 @@ class Sanitizer:
             result: dict[str, Any] = {}
             for key, item in value.items():
                 lowered = str(key).lower()
-                if lowered in {"encrypted_content", "data", "blob", "bytes", "raw_image", "audio"}:
+                if lowered == "encrypted_content" and isinstance(item, str) and not re.fullmatch(r"[A-Za-z0-9_+/=\-]+", item):
+                    result[str(key)] = self.sanitize_text(item)
+                elif lowered in {"encrypted_content", "data", "blob", "bytes", "raw_image", "audio"}:
                     raw = str(item)
                     result[str(key)] = self._binary_placeholder(raw, lowered) if len(raw) > 128 else "[BINARY_FIELD_REMOVED]"
-                elif any(marker in lowered for marker in ("token", "password", "cookie", "secret", "credential")):
+                elif re.fullmatch(CREDENTIAL_FIELD_RE_FRAGMENT, lowered, re.IGNORECASE) or lowered in {"密码", "口令", "密钥"} or any(marker in lowered for marker in ("token", "password", "cookie", "secret", "credential")):
                     result[str(key)] = "[REDACTED:CREDENTIAL_FIELD]"
                     self.stats["credential_fields_redacted"] += 1
                 elif cookie_jar and lowered == "value":
@@ -324,6 +376,18 @@ class Sanitizer:
 def classify_flags(text: str, existing: list[str] | None = None) -> list[str]:
     flags = set(existing or [])
     lowered = text.lower().strip()
+    # Exact wrappers/fixtures only: do not quarantine a real message merely for
+    # discussing permissions or quoting a short policy fragment.
+    if lowered.startswith(("base directory for this skill:", "<!-- maintenance-runner · crystallize ·")):
+        flags.add("runtime_injection")
+    if re.fullmatch(r"Response \d+: (?:Answer |Detailed response )+", text.strip() + " "):
+        flags.add("synthetic_fixture")
+    try:
+        policy = json.loads(text)
+    except (TypeError, ValueError):
+        policy = None
+    if isinstance(policy, dict) and isinstance(policy.get("outcome"), str) and policy["outcome"] in {"allow", "deny", "ask"} and set(policy) <= {"outcome", "risk_level", "user_authorization", "rationale"}:
+        flags.add("nested_approval")
     if any(marker in lowered for marker in RUNTIME_MARKERS):
         flags.add("runtime_injection")
     if any(marker in lowered for marker in DELEGATION_MARKERS):

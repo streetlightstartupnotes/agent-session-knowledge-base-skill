@@ -1,4 +1,6 @@
 interface:
   display_name: "Agent Knowledge Reader"
   short_description: "Read verified task-scoped Agent knowledge safely"
-  default_prompt: "Use $agent-knowledge-reader to load only verified knowledge relevant to my current task, return a usage receipt, apply active rules within scope, and return no_match instead of guessing."
+  default_prompt: "Use $agent-knowledge-reader only if my current context lacks a necessary personal fact or prior decision. Otherwise skip without private reads. Retrieve a bounded verified set and apply only in-scope rules."
+policy:
+  allow_implicit_invocation: true

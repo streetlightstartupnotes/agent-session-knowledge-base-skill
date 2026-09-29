@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -11,9 +12,62 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+_view_spec = importlib.util.spec_from_file_location("reader_context_units", Path(__file__).with_name("context_units.py"))
+_view_module = importlib.util.module_from_spec(_view_spec)
+_view_spec.loader.exec_module(_view_module)
+selection_options = _view_module.selection_options
+unit_view = _view_module.unit_view
+validate_units = _view_module.validate_units
+RETRIEVAL_ENGINE_VERSION = _view_module.RETRIEVAL_ENGINE_VERSION
 
-IDENTITY_TASK_RE = re.compile(r"身份|是谁|个人定位|当前方向|经历|简历|who am i|identity|career|current direction", re.IGNORECASE)
-COLLAB_TASK_RE = re.compile(r"协作|偏好|表达|文风|写作|口吻|禁区|怎么配合|collabor|preference|writing|voice|style", re.IGNORECASE)
+
+# Generic writing/style/voice/identity words are not personal-context intent.
+IDENTITY_TASK_RE = re.compile(
+    r"我的(?:身份(?!认证|验证|识别)|经历|简历|职业|个人定位|当前方向)|我是谁|"
+    r"\bwho am i\b|\bmy (?:current )?(?:personal (?:identity|background)|career|resume|direction)\b|"
+    r"\bmy (?:current )?(?:identity|background)\s*[?.!。！？]?\s*$",
+    re.IGNORECASE,
+)
+COLLAB_TASK_RE = re.compile(
+    r"我的(?:偏好|文风|口吻|写作风格|表达习惯)|按我(?:的|以往的|平时的)(?:风格|口吻|文风)|"
+    r"我们(?:之前|以前|过去|所有|历次)?的?(?:协作|合作)|怎么(?:和我|跟我)配合|"
+    r"\bmy (?:(?:writing|communication|personal) (?:style|voice)|preferences)\b|"
+    r"\b(?:write|speak) in my (?:style|voice)\b|"
+    r"\bour (?:past |previous )?collaboration\b",
+    re.IGNORECASE,
+)
+GENERIC_QUERY_TOKENS = frozenset(
+    "the a an and or to of for in on my our me we please continue help write writing "
+    "style voice identity project task agent ai update test tests fix code".split()
+) | frozenset({
+    "我的", "我们", "帮我", "继续", "一下", "这个", "那个", "之前", "现在",
+    "项目", "任务", "测试", "更新", "优化", "写作", "风格", "语音", "助手",
+})
+
+
+def base_context_types(task: str, selection: str) -> set[str]:
+    choices = {
+        "none": set(), "identity": {"identity"},
+        "collaboration": {"collaboration"}, "both": {"identity", "collaboration"},
+    }
+    if selection in choices:
+        return choices[selection]
+    if selection != "auto":
+        raise ValueError("base_context must be auto, none, identity, collaboration or both")
+    return ({"identity"} if IDENTITY_TASK_RE.search(task) else set()) | (
+        {"collaboration"} if COLLAB_TASK_RE.search(task) else set())
+
+
+def skipped_query(task: str) -> dict[str, Any]:
+    # No registry lookup, filesystem access, or publication claim on this path.
+    return {
+        "task": task, "match_status": "skipped",
+        "skip_reason": "current_context_sufficient",
+        "selected_count": 0, "project_matches": 0, "related_documents": 0,
+        "documents": [],
+    }
+
+
 PUBLICATION_PREREQUISITE_GATES = (
     "frozen_snapshot",
     "transport_accounted",
@@ -180,13 +234,22 @@ def verify_retrieval_report(root: Path, completion: dict[str, Any]) -> dict[str,
         raise ValueError("retrieval suite audit report does not match the verified completion")
     if (
         report.get("report_version") != 2
-        or int(report.get("retrieval_contract_version") or 0) != 2
+        or int(report.get("retrieval_contract_version") or 0) not in {2, 3}
+        or report.get("retrieval_contract_version") != completion.get("retrieval_contract_version")
         or report.get("run_id") != completion.get("run_id")
         or report.get("status") != "passed"
         or report.get("suite_sha256") != completion.get("retrieval_suite_sha256")
     ):
         raise ValueError("retrieval suite audit metadata is invalid")
     profile = report.get("retrieval_profile")
+    if report.get("retrieval_contract_version") == 3 and "retrieval_engine_version" not in report:
+        raise ValueError("retrieval contract 3 requires an engine and selection binding")
+    if "retrieval_engine_version" in report:
+        if (report["retrieval_engine_version"] != RETRIEVAL_ENGINE_VERSION
+                or completion.get("retrieval_engine_version") != RETRIEVAL_ENGINE_VERSION
+                or selection_options(report.get("selection_options")) != report.get("selection_options")
+                or report.get("selection_options") != completion.get("selection_options")):
+            raise ValueError("retrieval engine or selection options changed; rerun the suite")
     if (
         not isinstance(profile, dict)
         or set(profile) != set(DEFAULT_RETRIEVAL_PROFILE)
@@ -265,22 +328,49 @@ def verify_publication(root: Path, index: dict[str, Any]) -> dict[str, Any]:
 
 
 def tokenize(text: str) -> list[str]:
-    lowered = unicodedata.normalize("NFKC", text).lower()
-    tokens = re.findall(r"[a-z0-9][a-z0-9_.-]{1,}|[\u3400-\u9fff]{2,}", lowered)
-    expanded: list[str] = []
-    for token in tokens:
-        expanded.append(token)
-        if re.fullmatch(r"[\u3400-\u9fff]{3,}", token):
-            expanded.extend(token[index : index + 2] for index in range(len(token) - 1))
-    return expanded
+    # Unicode lexical matching, not translation or linguistic segmentation.
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    tokens: list[str] = []
+    fragment = ""
+    script = ""
+
+    def flush() -> None:
+        if len(fragment) >= 2:
+            tokens.append(fragment)
+            if script == "cjk" and len(fragment) >= 3:
+                tokens.extend(fragment[i : i + 2] for i in range(len(fragment) - 1))
+
+    for char in normalized:
+        code = ord(char)
+        cjk = (0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x9FFF
+               or 0x20000 <= code <= 0x3134F)
+        category = unicodedata.category(char)
+        kind = "cjk" if cjk else "word" if category[0] in "LN" else ""
+        if fragment and (category[0] == "M" or (script == "word" and char in "_.-")):
+            fragment += char
+        elif kind:
+            if script and script != kind:
+                flush()
+                fragment = ""
+            fragment += char
+            script = kind
+        else:
+            flush()
+            fragment, script = "", ""
+    flush()
+    return tokens
 
 
 def score(task: str, task_tokens: set[str], document: dict[str, Any]) -> int:
-    title = str(document.get("title") or "").lower()
-    aliases = [str(item).lower() for item in document.get("aliases") or []]
-    keywords = set(str(item).lower() for item in document.get("keywords") or [])
+    task_tokens = task_tokens - GENERIC_QUERY_TOKENS
+    if not task_tokens:
+        return 0
+    normalize = lambda value: unicodedata.normalize("NFKC", str(value)).casefold()
+    title = normalize(document.get("title") or "")
+    aliases = [normalize(item) for item in document.get("aliases") or []]
+    keywords = {normalize(item) for item in document.get("keywords") or []}
     value = 4 * len(task_tokens & keywords)
-    lowered = task.lower().strip()
+    lowered = normalize(task).strip()
     if lowered and lowered in title:
         value += 20
     if any(lowered and lowered in alias for alias in aliases):
@@ -327,12 +417,26 @@ def query(
     max_related: int | None = None,
     min_score: int | None = None,
     emit_content: bool = False,
+    context_sufficient: bool = False,
+    base_context: str | None = None,
+    view: str | None = None,
+    max_facts: int | None = None,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
+    if context_sufficient:
+        return skipped_query(task)
+    overrides = {key: value for key, value in dict(base_context=base_context, view=view,
+                 max_facts=max_facts, max_chars=max_chars).items() if value is not None}
+    selection_options(overrides)
     root = knowledge_root(kb)
     index = json.loads((root / "knowledge-index.json").read_text(encoding="utf-8"))
     if index.get("semantic_status") != "published":
         raise ValueError("knowledge is not published; complete review and distill before reading it as maintained knowledge")
     completion = verify_publication(root, index)
+    verified_selection = selection_options(completion.get("selection_options"))
+    selection = selection_options({**verified_selection, **overrides})
+    base_context, view = selection["base_context"], selection["view"]
+    allowed_base_types = base_context_types(task, base_context)
     completion_snapshot_sha256 = _canonical_sha256(completion)
     verified_profile = (
         dict(completion.get("retrieval_profile"))
@@ -360,16 +464,14 @@ def query(
                 selected.append(item)
                 return
 
-    add_type("evidence")
-    if IDENTITY_TASK_RE.search(task):
-        add_type("identity")
-    if COLLAB_TASK_RE.search(task):
-        add_type("collaboration")
+    for document_type in ("identity", "collaboration"):
+        if document_type in allowed_base_types:
+            add_type(document_type)
     tokens = set(tokenize(task))
     ranked = [(score(task, tokens, item), item) for item in documents if item.get("type") == "project"]
     ranked.sort(key=lambda pair: (-pair[0], str(pair[1].get("title") or ""), str(pair[1].get("path") or "")))
     for value, item in ranked:
-        if value < min_score or sum(chosen.get("type") == "project" for chosen in selected) >= max_projects:
+        if value <= 0 or value < min_score or sum(chosen.get("type") == "project" for chosen in selected) >= max_projects:
             break
         selected.append({**item, "relevance_score": value})
 
@@ -422,15 +524,33 @@ def query(
                     }
                 )
         seen_paths = set(selected_paths)
+        indexed_types = {str(item.get("path")): item.get("type") for item in documents}
         for item in related:
+            item = {**item, "type": indexed_types.get(item["path"])}
+            if item.get("type") in {"identity", "collaboration"} and item["type"] not in allowed_base_types:
+                continue
             if len(seen_paths - selected_paths) >= max_related or item["path"] in seen_paths:
                 continue
             seen_paths.add(item["path"])
             selected.append(item)
 
-    result_items = [_safe_document(root, item, allowed_paths, emit_content=emit_content) for item in selected]
+    matched = bool(selected)
+    if matched:
+        add_type("evidence")
+        selected.sort(key=lambda item: item.get("type") != "evidence")
+    indexed_by_path = {item["path"]: item for item in documents}
+    result_items = []
+    for item in selected:
+        indexed = indexed_by_path[item["path"]]
+        validate_units(indexed)
+        result_item = _safe_document(root, item, allowed_paths,
+                                    emit_content=emit_content and (view == "documents" or item.get("type") == "evidence"))
+        if emit_content and view != "documents" and item.get("type") != "evidence":
+            anchor_tokens = set(tokenize(str(indexed.get("title", "")) + " " + " ".join(indexed.get("aliases", []))))
+            result_item.update(unit_view(indexed, tokens - GENERIC_QUERY_TOKENS - anchor_tokens, selection))
+        result_items.append(result_item)
     project_matches = sum(item.get("type") == "project" and "relevance_score" in item for item in selected)
-    match_status = "matched" if project_matches or IDENTITY_TASK_RE.search(task) or COLLAB_TASK_RE.search(task) else "no_match"
+    match_status = "matched" if matched else "no_match"
     receipt = {
         "receipt_version": 1,
         "run_id": completion.get("run_id"),
@@ -442,7 +562,12 @@ def query(
         "selected_document_paths": sorted(str(item.get("relative_path")) for item in result_items if item.get("relative_path")),
         "publication_manifest_sha256": completion.get("publication_manifest_sha256"),
         "query_parameters": query_profile,
-        "verified_profile_used": query_profile == verified_profile,
+        "base_context": base_context,
+        "selection_options": selection,
+        "retrieval_engine_version": RETRIEVAL_ENGINE_VERSION,
+        "returned_content_chars": sum(len(item.get("content", "")) + item.get("returned_chars", 0) for item in result_items),
+        "verified_profile_used": (query_profile == verified_profile and selection == verified_selection
+                                  and completion.get("retrieval_engine_version") == RETRIEVAL_ENGINE_VERSION),
     }
     if (root.parent / "audit" / "lifecycle-transaction.json").exists():
         raise ValueError("a lifecycle transaction began during this read; retry after it is resumed")
@@ -478,6 +603,13 @@ def parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--max-related", type=int, help="Override the verified suite profile for this query.")
     query_parser.add_argument("--min-score", type=int, help="Override the verified suite profile for this query.")
     query_parser.add_argument("--emit-content", action="store_true")
+    query_parser.add_argument("--view", choices=("documents", "facts", "current"))
+    query_parser.add_argument("--max-facts", type=int)
+    query_parser.add_argument("--max-chars", type=int)
+    query_parser.add_argument("--base-context", choices=("auto", "none", "identity", "collaboration", "both"),
+                              help="Select needed base context; omitted uses the verified suite selection.")
+    query_parser.add_argument("--context-sufficient", action="store_true",
+                              help="Skip retrieval without opening the registry or knowledge base.")
     return root
 
 
@@ -488,13 +620,17 @@ def main(argv: list[str] | None = None) -> int:
             target = (args.config or default_registry_path()).expanduser()
             print(json.dumps({"registry": str(target), **load_registry(target)}, ensure_ascii=False, indent=2, sort_keys=True))
             return 0
+        if args.context_sufficient:
+            print(json.dumps(skipped_query(args.task), ensure_ascii=False, indent=2))
+            return 0
         supplied_limits = [value for value in (args.max_projects, args.max_related, args.min_score) if value is not None]
         if supplied_limits and min(supplied_limits) < 0:
             raise ValueError("limits and scores must be non-negative")
         kb = args.kb or resolve_registered(args.name, args.config)
         print(
             json.dumps(
-                query(kb, args.task, args.max_projects, args.max_related, args.min_score, args.emit_content),
+                query(kb, args.task, args.max_projects, args.max_related, args.min_score, args.emit_content,
+                      base_context=args.base_context, view=args.view, max_facts=args.max_facts, max_chars=args.max_chars),
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,

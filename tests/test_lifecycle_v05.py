@@ -299,6 +299,25 @@ def _fixture(base: Path, secret: str) -> tuple[Path, Path]:
 
 
 class LifecycleV05Tests(unittest.TestCase):
+    def test_lifecycle_discards_derived_units_and_stale_state_pointers(self) -> None:
+        for action in ("forget", "retract"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                body = "a removable reviewed conclusion"
+                kb, _ = _fixture(Path(directory), body)
+                index_path = kb / "knowledge/knowledge-index.json"
+                index = json.loads(index_path.read_text())
+                for document in index["documents"]:
+                    document["context_units"] = [{"unit_id": "claim-sensitive", "text": body}]
+                    document["current_state"] = {"goal": "claim-sensitive"}
+                _json(index_path, index)
+                plan = plan_lifecycle(kb, action, claim_ids=["claim-sensitive"])
+                apply_lifecycle_plan(kb, plan, commit=True)
+                after = json.loads(index_path.read_text())
+                self.assertEqual(after["semantic_status"], "lifecycle-pending-redistill")
+                self.assertTrue(all("context_units" not in d and "current_state" not in d for d in after["documents"]))
+                with self.assertRaises(ValueError):
+                    READER.query(kb, "sensitive", view="facts", emit_content=True)
+
     def test_forget_tombstone_survives_incremental_reparse_of_changed_content(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

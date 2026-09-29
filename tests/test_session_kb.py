@@ -415,6 +415,60 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         user_event = next(event for event in events if "inspect the project" in event["content"])
         self.assertNotIn("preloaded observation", user_event["content"])
 
+    def test_clacky_tool_only_chunk_is_normalized_without_user_assistant_headings(self) -> None:
+        fixture = self.root / "clacky-tool-only-chunk"
+        fixture.mkdir()
+        chunk = fixture / "2026-01-01-00-00-00-fedcba98-chunk-1.md"
+        chunk.write_text(
+            "---\nsession_id: fedcba9876543210\n---\n\n# Session Chunk 1\n\n"
+            "### Tool Result: terminal\n\n```\nfirst observation\n```\n\n"
+            "### Tool Result: browser\n\n```\nsecond observation\n```\n",
+            encoding="utf-8",
+        )
+        output, _, _ = self._build(fixture)
+        events = read_jsonl(output / "audit" / "events.jsonl")
+        errors = read_jsonl(output / "audit" / "errors.jsonl")
+        self.assertEqual([event["event_type"] for event in events], ["tool_result", "tool_result"])
+        self.assertEqual([event["tool_name"] for event in events], ["terminal", "browser"])
+        self.assertTrue(all(event["session_id"] == "fedcba9876543210" for event in events))
+        self.assertFalse(any(item.get("error") == "chunk_headings_missing" for item in errors))
+
+    def test_clacky_image_only_message_is_accounted_as_attachment_without_private_fields(self) -> None:
+        fixture = self.root / "clacky-image-only"
+        fixture.mkdir()
+        source = fixture / "image-only.json"
+        private_path = str(Path.home() / "private" / "reference.png")
+        source.write_text(
+            json.dumps(
+                {
+                    "session_id": "image-only-1",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "data:" + "image/png;" + "base64," + "AAAA"},
+                                    "image_path": private_path,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        output, _, _ = self._build(fixture)
+        events = read_jsonl(output / "audit" / "events.jsonl")
+        state = json.loads((output / "audit" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event_type"], "attachment")
+        self.assertEqual(events[0]["role"], "user")
+        self.assertIn("image_url", events[0]["content"])
+        self.assertNotIn(private_path, json.dumps(events, ensure_ascii=False))
+        source_state = next(iter(state["sources"].values()))
+        self.assertEqual(source_state["transport_records_unaccounted"], 0)
+
     def test_identity_isolation_across_delegation_sidechain_and_test_role(self) -> None:
         fixture = self.root / "identity"
         codex = fixture / "codex.jsonl"
@@ -464,6 +518,12 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         assigned_value = "pass" + "word=" + "HiddenValue42"
         header_value = "Cook" + "ie: session=abc123456789"
         slack = "xoxb-" + "A" * 24
+        stdin_value = "T3rminal" + "Secret42"
+        stdin_call = f'const result = await tools.write_stdin({{"session_id":123,"chars":"{stdin_value}\\n"}});'
+        echoed_opaque_value = "agent42_" + ("Echo9" * 8) + "_" + ("f1" * 32)
+        echoed_stdin_call = f'const result = await tools.write_stdin({{"session_id":456,"chars":"{echoed_opaque_value}\\n"}});'
+        safe_sha256 = "a1" * 32
+        macos_temp_path = "/var/folders/ab/private-session/T/reference-image.png"
         private_ip = ".".join(("192", "168", "23", "42"))
         binary = base64.b64encode(b"\x89PNG" + b"x" * 5000).decode("ascii")
         fixture = self.root / (email + "-" + phone)
@@ -473,7 +533,8 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
                 {
                     "session_id": "privacy-1",
                     "messages": [
-                        {"role": "user", "content": f"{token} {email} {phone} {assigned_value} {header_value} {slack} {private_ip} {Path.home()}/private/file"},
+                        {"role": "user", "content": f"{token} {email} {phone} {assigned_value} {header_value} {slack} {stdin_call} {echoed_stdin_call} {private_ip} {Path.home()}/private/file"},
+                        {"role": "assistant", "content": f"Terminal echoed {echoed_opaque_value}; checksum {safe_sha256}; image {macos_temp_path}"},
                         {"role": "assistant", "content": binary},
                     ],
                 }
@@ -482,10 +543,12 @@ class SessionKnowledgeBaseTests(unittest.TestCase):
         )
         output, _, result = self._build(fixture)
         combined = "\n".join(path.read_text(encoding="utf-8", errors="replace") for path in output.rglob("*") if path.is_file())
-        for secret in (token, email, phone, "HiddenValue42", "abc123456789", slack, private_ip, str(Path.home()), binary):
+        for secret in (token, email, phone, "HiddenValue42", "abc123456789", slack, stdin_value, echoed_opaque_value, macos_temp_path, private_ip, str(Path.home()), binary):
             self.assertNotIn(secret, combined)
         self.assertIn("[BINARY_REMOVED", combined)
         self.assertIn("[REDACTED:EMAIL]", combined)
+        self.assertIn("[REDACTED:TEMP_PATH]", combined)
+        self.assertIn(safe_sha256, combined)
         self.assertGreater(result["stats"]["sensitive_redactions"], 0)
         self.assertGreater(result["stats"]["binary_payloads_removed"], 0)
 

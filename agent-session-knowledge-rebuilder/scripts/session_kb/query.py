@@ -2,14 +2,59 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 from .render import tokenize
+from .context_units import selection_options, unit_view, validate_units
 
 
-IDENTITY_TASK_RE = re.compile(r"身份|是谁|个人定位|当前方向|经历|简历|who am i|identity|career|current direction", re.IGNORECASE)
-COLLAB_TASK_RE = re.compile(r"协作|偏好|表达|文风|写作|口吻|禁区|怎么配合|collabor|preference|writing|voice|style", re.IGNORECASE)
+# Generic writing/style/voice/identity words are not personal-context intent.
+IDENTITY_TASK_RE = re.compile(
+    r"我的(?:身份(?!认证|验证|识别)|经历|简历|职业|个人定位|当前方向)|我是谁|"
+    r"\bwho am i\b|\bmy (?:current )?(?:personal (?:identity|background)|career|resume|direction)\b|"
+    r"\bmy (?:current )?(?:identity|background)\s*[?.!。！？]?\s*$",
+    re.IGNORECASE,
+)
+COLLAB_TASK_RE = re.compile(
+    r"我的(?:偏好|文风|口吻|写作风格|表达习惯)|按我(?:的|以往的|平时的)(?:风格|口吻|文风)|"
+    r"我们(?:之前|以前|过去|所有|历次)?的?(?:协作|合作)|怎么(?:和我|跟我)配合|"
+    r"\bmy (?:(?:writing|communication|personal) (?:style|voice)|preferences)\b|"
+    r"\b(?:write|speak) in my (?:style|voice)\b|"
+    r"\bour (?:past |previous )?collaboration\b",
+    re.IGNORECASE,
+)
+GENERIC_QUERY_TOKENS = frozenset(
+    "the a an and or to of for in on my our me we please continue help write writing "
+    "style voice identity project task agent ai update test tests fix code".split()
+) | frozenset({
+    "我的", "我们", "帮我", "继续", "一下", "这个", "那个", "之前", "现在",
+    "项目", "任务", "测试", "更新", "优化", "写作", "风格", "语音", "助手",
+})
+
+
+def base_context_types(task: str, selection: str) -> set[str]:
+    choices = {
+        "none": set(), "identity": {"identity"},
+        "collaboration": {"collaboration"}, "both": {"identity", "collaboration"},
+    }
+    if selection in choices:
+        return choices[selection]
+    if selection != "auto":
+        raise ValueError("base_context must be auto, none, identity, collaboration or both")
+    return ({"identity"} if IDENTITY_TASK_RE.search(task) else set()) | (
+        {"collaboration"} if COLLAB_TASK_RE.search(task) else set())
+
+
+def skipped_query(task: str) -> dict[str, Any]:
+    # No registry lookup, filesystem access, or publication claim on this path.
+    return {
+        "task": task, "match_status": "skipped",
+        "skip_reason": "current_context_sufficient",
+        "selected_count": 0, "project_matches": 0, "related_documents": 0,
+        "documents": [],
+    }
 
 
 def _knowledge_root(kb: Path) -> Path:
@@ -87,11 +132,15 @@ def load_validated_graph(root: Path, index: dict[str, Any]) -> dict[str, Any]:
 
 
 def _score(task: str, task_tokens: set[str], document: dict[str, Any]) -> int:
-    title = str(document.get("title") or "").lower()
-    aliases = [str(item).lower() for item in document.get("aliases") or []]
-    keywords = set(str(item).lower() for item in document.get("keywords") or [])
+    task_tokens = task_tokens - GENERIC_QUERY_TOKENS
+    if not task_tokens:
+        return 0
+    normalize = lambda value: unicodedata.normalize("NFKC", str(value)).casefold()
+    title = normalize(document.get("title") or "")
+    aliases = [normalize(item) for item in document.get("aliases") or []]
+    keywords = {normalize(item) for item in document.get("keywords") or []}
     score = 4 * len(task_tokens & keywords)
-    lowered = task.lower().strip()
+    lowered = normalize(task).strip()
     if lowered and lowered in title:
         score += 20
     if any(lowered and lowered in alias for alias in aliases):
@@ -112,7 +161,18 @@ def query_knowledge(
     allow_draft: bool = False,
     min_score: int = 4,
     max_related: int = 2,
+    context_sufficient: bool = False,
+    base_context: str = "auto",
+    view: str = "documents",
+    max_facts: int = 6,
+    max_chars: int = 6000,
 ) -> dict[str, Any]:
+    if context_sufficient:
+        return skipped_query(task)
+    allowed_base_types = base_context_types(task, base_context)
+    selection = selection_options(dict(base_context=base_context, view=view, max_facts=max_facts, max_chars=max_chars))
+    if min(max_projects, max_related, min_score) < 0:
+        raise ValueError("limits and scores must be non-negative")
     root = _knowledge_root(kb)
     index = json.loads((root / "knowledge-index.json").read_text(encoding="utf-8"))
     semantic_status = str(index.get("semantic_status") or "draft")
@@ -129,16 +189,14 @@ def query_knowledge(
                 selected.append(item)
                 return
 
-    add_type("evidence")
-    if IDENTITY_TASK_RE.search(task):
-        add_type("identity")
-    if COLLAB_TASK_RE.search(task):
-        add_type("collaboration")
+    for document_type in ("identity", "collaboration"):
+        if document_type in allowed_base_types:
+            add_type(document_type)
 
     project_scores = [(_score(task, task_tokens, item), item) for item in documents if item.get("type") == "project"]
     project_scores.sort(key=lambda pair: (-pair[0], str(pair[1].get("title") or ""), str(pair[1].get("path") or "")))
     for score, item in project_scores:
-        if score < min_score or len([chosen for chosen in selected if chosen.get("type") == "project"]) >= max_projects:
+        if score <= 0 or score < min_score or len([chosen for chosen in selected if chosen.get("type") == "project"]) >= max_projects:
             break
         selected.append({**item, "relevance_score": score})
 
@@ -193,15 +251,26 @@ def query_knowledge(
                     )
             seen_paths = set(selected_paths)
             added = 0
+            indexed_types = {str(item.get("path")): item.get("type") for item in documents}
             for item in related:
+                item = {**item, "type": indexed_types.get(item["path"])}
+                if item.get("type") in {"identity", "collaboration"} and item["type"] not in allowed_base_types:
+                    continue
                 if added >= max_related or item["path"] in seen_paths:
                     continue
                 seen_paths.add(item["path"])
                 selected.append(item)
                 added += 1
 
+    matched = bool(selected)
+    if matched:
+        add_type("evidence")
+        selected.sort(key=lambda item: item.get("type") != "evidence")
     result_items: list[dict[str, Any]] = []
+    indexed_by_path = {item["path"]: item for item in documents}
     for item in selected:
+        indexed = indexed_by_path[item["path"]]
+        validate_units(indexed)
         path, _ = _safe_published_path(root, item["path"], "selected document")
         entry = {
             "path": str(path),
@@ -224,15 +293,20 @@ def query_knowledge(
         ):
             if key in item and item[key] is not None:
                 entry[key] = item[key]
-        if emit_content:
+        if emit_content and (view == "documents" or item.get("type") == "evidence"):
             entry["content"] = path.read_text(encoding="utf-8")
+        elif emit_content:
+            anchor_tokens = set(tokenize(str(indexed.get("title", "")) + " " + " ".join(indexed.get("aliases", []))))
+            entry.update(unit_view(indexed, task_tokens - GENERIC_QUERY_TOKENS - anchor_tokens, selection))
         result_items.append(entry)
     project_matches = sum(item.get("type") == "project" and "relevance_score" in item for item in selected)
     return {
         "task": task,
         "knowledge_root": str(root),
         "semantic_status": semantic_status,
-        "match_status": "matched" if project_matches or IDENTITY_TASK_RE.search(task) or COLLAB_TASK_RE.search(task) else "no_match",
+        "base_context": base_context,
+        "selection_options": selection,
+        "match_status": "matched" if matched else "no_match",
         "selected_count": len(result_items),
         "project_matches": project_matches,
         "related_documents": sum("relationship" in item for item in result_items),

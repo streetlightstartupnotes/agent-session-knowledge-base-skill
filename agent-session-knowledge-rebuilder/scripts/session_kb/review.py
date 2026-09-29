@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .evolution_ops import behavior_evidence_order_errors
+from .context_units import STATE_FIELDS, history_unit
 from .model import UnifiedEvent
 from .render import _keywords, _slug
 from .sanitize import Sanitizer
@@ -637,6 +638,8 @@ def project_synthesis_sha256(project: dict[str, Any]) -> str:
             "history",
         )
     }
+    if "current_state" in project:
+        payload["current_state"] = project["current_state"]
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return sha256(serialized.encode("utf-8")).hexdigest()
 
@@ -709,6 +712,7 @@ def _seed_review_from_prior(template: dict[str, Any], prior_path: Path, events: 
             "link_analysis",
             "completion",
             "history",
+            "current_state",
         ):
             if field in previous:
                 current[field] = _clone(previous[field])
@@ -945,6 +949,7 @@ def create_review_template(
                 "link_analysis": {"status": "unreviewed", "rationale": ""},
                 "completion": {"level": "unreviewed", "status": "unverified", "evidence_event_ids": [], "rationale": ""},
                 "history": {section: [] for section in HISTORY_SECTIONS},
+                "current_state": {},
             }
         )
     template = {
@@ -1597,6 +1602,21 @@ def validate_review(
                 _validate_history_item(item, key, event_by_id, errors, f"project {key} {section}[{item_index}]")
         if status == "reviewed" and history_count == 0:
             errors.append(f"project {key}: reviewed knowledge project needs at least one evidence-bound history item")
+        current_state = project.get("current_state", {})
+        if not isinstance(current_state, dict) or set(current_state) - STATE_FIELDS:
+            errors.append(f"project {key}: invalid current_state fields")
+        else:
+            for field, reference in current_state.items():
+                if not isinstance(reference, dict) or set(reference) != {"section", "item_index"}:
+                    errors.append(f"project {key}: {field} needs an exact history reference")
+                    continue
+                section, position = reference["section"], reference["item_index"]
+                items = history.get(section, []) if isinstance(section, str) else []
+                if (section not in HISTORY_SECTIONS or not isinstance(items, list) or type(position) is not int
+                        or position < 0 or position >= len(items)):
+                    errors.append(f"project {key}: {field} references missing history")
+                elif not isinstance(items[position], dict) or items[position].get("status") in {"stale", "retracted"}:
+                    errors.append(f"project {key}: current state cannot activate stale/retracted history")
         exceptions = project.get("event_exceptions") if isinstance(project.get("event_exceptions"), list) else []
         seen_exceptions: set[str] = set()
         for exception in exceptions:
@@ -2224,6 +2244,20 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
         ("02-collaboration-and-expression.md", "collaboration"),
     ):
         index_documents.append({"path": path, "title": documents[path].splitlines()[0].lstrip("# "), "type": doc_type, "keywords": _keywords(documents[path])})
+        base_units = []
+        for claim in claims:
+            if _claim_document_path(claim["knowledge_type"]) != path:
+                continue
+            unit = {"unit_id": claim["claim_id"], "section": claim["knowledge_type"],
+                    "text": claim["statement"], **{field: claim[field] for field in
+                    ("status", "evidence_event_ids", "confidence", "observed_at", "applies_to",
+                     "conflicts", "supersedes", "rule_scope", "derivation") if field in claim}}
+            unit["evolutions"] = [{field: item.get(field) for field in
+                ("evolution_id", "status", "scope", "validation_result", "expected_behavior_change",
+                 "observed_behavior_change", "baseline_event_ids", "validation_event_ids")}
+                for item in rule_evolutions if item.get("promoted_claim_id") == claim["claim_id"]]
+            base_units.append(unit)
+        index_documents[-1]["context_units"] = base_units
 
     project_path_by_key: dict[str, str] = {}
     published_projects = 0
@@ -2235,6 +2269,12 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
         aliases = [str(alias) for alias in project.get("aliases") or []]
         lines = [f"# {title}", "", f"Project key: `{key}`", "", f"Aliases: {', '.join(aliases) or 'none'}", ""]
         completion_state = project.get("completion") or {}
+        current_state = project.get("current_state") or {}
+        if current_state:
+            lines.extend(["## Current reviewed state", "", "Bounded by this publication; missing fields remain unknown.", ""])
+            for field, reference in current_state.items():
+                lines.extend([f"### {field.replace('_', ' ').title()}", "",
+                    _entry_markdown(project["history"][reference["section"]][reference["item_index"]]), ""])
         completion_evidence = ", ".join(f"`{event_id}`" for event_id in completion_state.get("evidence_event_ids") or []) or "none"
         lines.extend(
             [
@@ -2270,12 +2310,21 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
                 "event_count": len(groups[key]),
                 "completion_level": completion_state.get("level"),
                 "completion_status": completion_state.get("status"),
+                "context_units": [history_unit(section, position, item)
+                    for section in HISTORY_SECTIONS for position, item in enumerate(project["history"][section])],
+                "current_state": {field: f"history:{ref['section']}:{ref['item_index']}"
+                    for field, ref in current_state.items()},
                 "keywords": _keywords(title + "\n" + "\n".join(aliases) + "\n" + documents[relative]),
             }
         )
         published_projects += 1
 
     document_by_path = {str(item["path"]): item for item in index_documents}
+    for document in index_documents:
+        for unit in document.get("context_units", []):
+            unit["evidence_observed_at"] = {event_id: event_by_id[event_id].timestamp
+                for event_id in unit["evidence_event_ids"] if event_by_id[event_id].timestamp is not None}
+            unit["publication_run_id"] = review["run_id"]
     graph_nodes: list[dict[str, Any]] = [
         {
             "id": f"doc:{path}",
@@ -2597,7 +2646,7 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
     else:
         evolution_status = "no_feedback_recorded"
     index = {
-        "index_version": 4,
+        "index_version": 5,
         "semantic_status": "published",
         "run_id": review["run_id"],
         "review_event_set_sha256": review["event_set_sha256"],
@@ -2648,7 +2697,7 @@ def distill_review(kb: Path, review_path: Path) -> dict[str, Any]:
     completion = json.loads((root / "audit" / "completion-report.json").read_text(encoding="utf-8"))
     has_unsupported = not completion.get("gates", {}).get("unsupported_formats_clear")
     completion["status"] = "needs_retrieval_verification"
-    completion["retrieval_contract_version"] = 2
+    completion["retrieval_contract_version"] = 3
     completion["gates"]["semantic_review_complete"] = True
     completion["gates"]["knowledge_graph_complete"] = True
     completion["gates"]["published_knowledge"] = True

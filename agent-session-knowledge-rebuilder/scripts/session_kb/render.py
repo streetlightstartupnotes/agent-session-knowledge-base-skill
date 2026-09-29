@@ -50,14 +50,37 @@ def _slug(label: str, key: str) -> str:
 
 
 def tokenize(text: str) -> list[str]:
-    lowered = unicodedata.normalize("NFKC", text).lower()
-    tokens = re.findall(r"[a-z0-9][a-z0-9_.-]{1,}|[\u3400-\u9fff]{2,}", lowered)
-    expanded: list[str] = []
-    for token in tokens:
-        expanded.append(token)
-        if re.fullmatch(r"[\u3400-\u9fff]{3,}", token):
-            expanded.extend(token[index : index + 2] for index in range(len(token) - 1))
-    return expanded
+    # Unicode lexical matching, not translation or linguistic segmentation.
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    tokens: list[str] = []
+    fragment = ""
+    script = ""
+
+    def flush() -> None:
+        if len(fragment) >= 2:
+            tokens.append(fragment)
+            if script == "cjk" and len(fragment) >= 3:
+                tokens.extend(fragment[i : i + 2] for i in range(len(fragment) - 1))
+
+    for char in normalized:
+        code = ord(char)
+        cjk = (0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x9FFF
+               or 0x20000 <= code <= 0x3134F)
+        category = unicodedata.category(char)
+        kind = "cjk" if cjk else "word" if category[0] in "LN" else ""
+        if fragment and (category[0] == "M" or (script == "word" and char in "_.-")):
+            fragment += char
+        elif kind:
+            if script and script != kind:
+                flush()
+                fragment = ""
+            fragment += char
+            script = kind
+        else:
+            flush()
+            fragment, script = "", ""
+    flush()
+    return tokens
 
 
 def _keywords(text: str, limit: int = 120) -> list[str]:

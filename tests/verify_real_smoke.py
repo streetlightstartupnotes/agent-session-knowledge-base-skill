@@ -166,7 +166,7 @@ def main() -> int:
         if completion.get("status") != "complete" or index.get("semantic_status") != "published":
             failures.append({"case": name, "check": "publication_gate", "completion": completion.get("status"), "index": index.get("semantic_status")})
         if (
-            completion.get("retrieval_contract_version") != 2
+            completion.get("retrieval_contract_version") not in {2, 3}
             or not completion.get("retrieval_suite_sha256")
             or not completion.get("retrieval_verification_sha256")
         ):

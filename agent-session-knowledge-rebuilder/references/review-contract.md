@@ -134,7 +134,7 @@ Deterministic project keys are routing proposals. Before setting `reviewed`, ins
 
 Changing a title or alias does not move events. If a false merge or split would make the history misleading and the schema cannot express the correction, keep the affected project unreviewed and block publication. A graph relationship cannot repair wrong membership.
 
-## Write histories and the completion ladder
+## Write histories and bounded completion states
 
 Use every applicable history section:
 
@@ -148,16 +148,37 @@ Use every applicable history section:
 
 Every item needs a bounded statement, chain-local event ids, and an honest status such as `observed`, `agent-reported`, `inferred`, `disputed`, `stale`, `retracted`, or `unverified`. Optional `before`, `after`, and `applies_to` fields preserve a correction without generalizing it.
 
-Each project also records one highest completion level:
+### Optional current-state references
+
+After reading the whole chain, a project may set `current_state` with any supported
+fields: `goal`, `accepted_baseline`, `constraints`, `latest_correction`, `delivery`,
+and `next_step`. Each value is an exact existing history reference, for example
+`{"section": "objective", "item_index": 0}`. Omit unknown fields. Never select a
+baseline or next action merely because it was the Agent's latest suggestion.
+
+The validator requires existing references and refuses stale/retracted targets.
+Their evidence and status remain those of the reviewed history item; a state
+reference cannot upgrade Agent-reported material to observed or accepted. Semantic
+correctness still requires review. Current-state references are included in project
+synthesis and cross-project hashes, carried only with unchanged reviewed projects,
+and cleared when lifecycle operations affect the referenced history. Publication
+renders the state before the full history and includes evidence-bound context units
+in the index. No separate editable state database is created.
+
+The existing schema also requires one completion summary level from this vocabulary:
 
 ```text
-requested -> designed -> implemented -> artifact-created -> installed
--> enabled -> invoked -> automated-tests-passed -> real-interaction-observed
--> user-accepted -> submitted -> merged -> remotely-published
--> publicly-reachable
+requested, designed, implemented, artifact-created, installed,
+enabled, invoked, automated-tests-passed, real-interaction-observed,
+user-accepted, submitted, merged, remotely-published, publicly-reachable
 ```
 
 Use `unknown` when no safe level exists and `not-published` for reviewed-no-knowledge projects. Store status, evidence ids, and a rationale explaining both the supported layer and what it does not prove. Observable higher levels need matching primary-user or grade-B evidence; Agent-only prose stays `agent-reported`.
+
+This preserves the schema, not an implied success ladder. A published draft can
+remain unapproved; accepted text may still lack the requested file. Record each
+artifact/version/environment separately in history and explain mixed states in
+the completion rationale. Never infer all other levels from the summary label.
 
 ## Publish base claims conservatively
 
@@ -198,6 +219,6 @@ Reviewer id, timestamp, and attestation are required. The attestation means ever
   --eval-set /approved/private/retrieval-eval.json
 ```
 
-`distill` ends at `needs_retrieval_verification` and sets retrieval contract 2. The private eval set must contain at least two distinct `related` cases and two distinct `hard_negative` cases after privacy cleanup. It has exactly one shared `retrieval_profile` containing `min_score`, `max_projects`, and `max_related`; a case that tries to override any of them is invalid. Related cases may require project keys, document types, and `min_project_matches`. Hard negatives must declare no expected match and return `no_match`. The suite hash binds the shared profile and case expectations, including `min_project_matches`; weakening either changes suite identity. The audit stores hashes and summaries, not task text.
+`distill` ends at `needs_retrieval_verification` and sets retrieval contract 3. The private eval set still needs two distinct related tasks and two hard negatives. One shared `retrieval_profile` holds the existing score/project/related limits. Optional suite-wide `selection_options` holds `base_context`, `view`, `max_facts` and `max_chars`; per-case overrides of either group are refused. Compact related cases default to requiring at least one returned context unit, adjustable through an explicit `min_context_units` expectation. Engine version, both configurations and all expectations bind the suite hash. Reports store counts and hashes, never task or fact bodies. Old contract-2 publications remain inspectable through their original gates but do not verify a changed engine.
 
 The legacy `--related-task`/`--unrelated-task` pair remains diagnostic. It cannot complete a v0.5 retrieval-contract-2 publication even when both cases pass. Do not register or use the Reader while status is draft, semantically incomplete, lifecycle-pending, merely distilled, retrieval-suite-unverified, or run-id mismatched.

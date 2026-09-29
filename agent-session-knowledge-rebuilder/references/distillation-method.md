@@ -83,7 +83,9 @@ Publishing materializes one graph edge and reciprocal Markdown navigation for ea
 - During the first complete read, preserve each exact range as an attested `semantic_chunk` with in-range evidence notes and note hashes. On a later run, reuse only chunks whose range and adjacent-boundary hashes still match; reread the reported complements and synthesize the complete current project again.
 - Prioritize corrections, errors, state transitions, patches, tests, browser/device observations, and deliveries when constructing the project state sheet. Still read the surrounding messages so the priority signal does not become a context-free conclusion.
 - For concrete feedback, preserve the rejected form and accepted replacement as `before` and `after`, plus the scope where the lesson applies. This is more reusable and less hallucinatory than turning one correction into a universal personality rule.
-- Store the detailed project history once. Later tasks retrieve only evidence rules, the relevant base rule set, and one to three matching projects.
+- Store the detailed project history once. Later tasks first check whether current
+  context suffices; retrieve nothing if it does. Otherwise retrieve the missing
+  fact's evidence rules and relevant record, not a fixed quota of base pages or projects.
 - Follow only a small bounded number of confirmed graph edges during retrieval. A deep graph should improve discovery without flooding every task with the whole knowledge base.
 
 ## Claim-promotion gates
@@ -102,9 +104,12 @@ An earlier command proves action order, not the user's original motivation. A mi
 
 ### Completion
 
-Track declared capability, implementation, local installation, enablement, invocation, artifact generation, automated tests, real interaction, user acceptance, remote publication, and public accessibility separately. Only the highest observed layer may be reported as complete.
-
-The project history should use the same ladder for each deliverable. An Agent sentence such as “done” is a grade-C assertion; a patch, test result, browser observation, delivered file, and user acceptance are different evidence layers and must not be collapsed.
+Track declared capability, implementation, installation, invocation, tests, real
+interaction, acceptance and publication separately per deliverable and environment.
+The schema's completion summary is not proof of all earlier states: something
+publicly reachable may remain unaccepted or defective. Preserve these limits in
+history and completion rationale. An Agent sentence such as “done” is grade C;
+only report the specific state actually supported by evidence.
 
 ### External facts
 

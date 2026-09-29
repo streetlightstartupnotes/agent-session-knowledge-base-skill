@@ -147,7 +147,7 @@ class RetrievalSuiteV05Tests(unittest.TestCase):
             for task in raw_tasks:
                 self.assertNotIn(task, serialized)
             completion = json.loads((kb / "audit" / "completion-report.json").read_text(encoding="utf-8"))
-            self.assertEqual(completion["retrieval_contract_version"], 2)
+            self.assertEqual(completion["retrieval_contract_version"], 3)
             self.assertTrue(completion["gates"]["retrieval_related_suite"])
             self.assertTrue(completion["gates"]["retrieval_hard_negative_suite"])
             reader_result = READER.query(kb, "continue alpha engine", max_projects=1)

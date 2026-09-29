@@ -1083,6 +1083,9 @@ def _update_review(review: dict[str, Any], context: Mapping[str, Any], action: s
     for project in updated.get("projects") or []:
         project_key = str(project.get("project_key") or "")
         selected_project = project_key in selected_projects
+        if selected_project or any(_evidence_ids(item) & selected_events
+                for items in (project.get("history") or {}).values() for item in items or []):
+            project.pop("current_state", None)
         if action == "forget" and selected_project:
             project["title"] = "Forgotten project " + _id_hash(project_key)[:12]
             project["aliases"] = []
@@ -1247,6 +1250,11 @@ def _apply_locked(root: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
 
         index = json.loads(json.dumps(context["index"], ensure_ascii=False, default=str))
         index["documents"] = [item for item in index.get("documents") or [] if str(item.get("path") or "") not in context["project_doc_paths"]]
+        # Derived units duplicate reviewed bodies; never keep a stale compact
+        # view across retract/forget. Redistillation reconstructs safe units.
+        for document in index["documents"]:
+            document.pop("context_units", None)
+            document.pop("current_state", None)
         index["semantic_status"] = "lifecycle-pending-redistill"
         index["lifecycle_plan_sha256"] = plan["plan_sha256"]
         if isinstance(index.get("graph"), dict):

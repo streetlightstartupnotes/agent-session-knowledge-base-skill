@@ -25,6 +25,7 @@ from .inventory import inventory_environment
 from .locking import mutation_lock
 from .lifecycle import apply_lifecycle_plan, list_due_revalidations, plan_lifecycle
 from .pipeline import build_knowledge_base
+from . import maintenance
 from .query import query_knowledge
 from .release import release_check
 from .review import cross_project_state_sha256, create_review_packet, create_review_template, distill_review, validate_review
@@ -33,6 +34,22 @@ from .verification import verify_retrieval, verify_retrieval_suite
 
 def _json_print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str))
+
+
+def rebuild_summary(result: dict[str, Any], output: Path, dry_run: bool) -> dict[str, Any]:
+    """Bounded stdout; full evidence remains in private audit files after writes."""
+    return {
+        "run_id": result.get("run_id"),
+        "event_count": result.get("event_count"),
+        "completion": result.get("completion"),
+        "publication_preserved": result.get("publication_preserved", False),
+        "counts": {key: len(result.get(key, [])) for key in ("unsupported", "coverage_gaps", "errors", "excluded")},
+        "dry_run": dry_run,
+        "details_written": not dry_run,
+        "audit_directory": str(output / "audit") if not dry_run else None,
+        "detail_files": ["stats.json", "impact-report.json", "errors.jsonl", "excluded.jsonl", "unsupported-formats.json", "coverage-gaps.json"] if not dry_run else [],
+        "note": "Extraction is not semantic review. Inspect private detail files for all errors, exclusions and gaps." if not dry_run else "No detail files were written; rerun without --summary to inspect full dry-run details.",
+    }
 
 
 def _write_json_exclusive(path: Path, value: Any) -> None:
@@ -226,6 +243,21 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    for action in ("configure", "revoke", "stage", "restage", "status", "apply", "cancel"):
+        command = subparsers.add_parser("maintenance-" + action, help="Opt-in maintenance of exact human-managed Markdown pages.")
+        command.add_argument("--root", type=Path, required=True)
+        if action == "configure":
+            command.add_argument("--target", action="append", required=True)
+            command.add_argument("--authorization-ref", required=True)
+        if action in {"stage", "restage"}:
+            command.add_argument("--target", required=True)
+            command.add_argument("--delta-file", type=Path, required=True)
+            command.add_argument("--source-ref", required=True)
+        if action in {"apply", "cancel", "restage"}:
+            command.add_argument("--id", required=True)
+        if action == "apply":
+            command.add_argument("--commit", action="store_true")
+
     discover_parser = subparsers.add_parser("discover", help="Probe the current environment or explicit roots without changing sources.")
     _add_source_arguments(discover_parser)
     discover_parser.add_argument("--json", action="store_true", help="Print the complete JSON discovery report.")
@@ -258,6 +290,7 @@ def make_parser() -> argparse.ArgumentParser:
     rebuild_parser.add_argument("--output", type=Path, required=True, help="Generated knowledge-base directory.")
     rebuild_parser.add_argument("--incremental", action="store_true", help="Reuse prior state and read verified append-only tails.")
     rebuild_parser.add_argument("--dry-run", action="store_true", help="Parse and report planned results without writing artifacts.")
+    rebuild_parser.add_argument("--summary", action="store_true", help="Print bounded counts and audit paths, not every exclusion. Full JSON remains the compatibility default.")
 
     query_parser = subparsers.add_parser("query", help="Select the smallest relevant knowledge set for a task.")
     query_parser.add_argument("--kb", type=Path, required=True, help="Knowledge-base root or its knowledge/ directory.")
@@ -267,6 +300,12 @@ def make_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--allow-draft", action="store_true", help="Allow querying unreviewed evidence drafts; never use this as confirmed knowledge.")
     query_parser.add_argument("--min-score", type=int, default=4, help="Minimum project relevance score; default 4.")
     query_parser.add_argument("--max-related", type=int, default=2, help="Maximum one-hop evidence-backed related documents to add.")
+    query_parser.add_argument("--context-sufficient", action="store_true", help="Skip retrieval without reading knowledge files.")
+    query_parser.add_argument("--view", choices=("documents", "facts", "current"), default="documents")
+    query_parser.add_argument("--max-facts", type=int, default=6)
+    query_parser.add_argument("--max-chars", type=int, default=6000)
+    query_parser.add_argument("--base-context", choices=("auto", "none", "identity", "collaboration", "both"),
+                              default="auto", help="Select only needed base context; auto keeps legacy inference.")
 
     review_parser = subparsers.add_parser("review-init", help="Create a project-hashed semantic-review template for a rebuilt evidence layer.")
     review_parser.add_argument("--kb", type=Path, required=True, help="Knowledge-base root containing audit/events.jsonl.")
@@ -368,6 +407,25 @@ def make_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.command.startswith("maintenance-"):
+        action = args.command.removeprefix("maintenance-")
+        if action == "configure":
+            result = maintenance.configure(args.root, args.target, args.authorization_ref)
+        elif action == "revoke":
+            result = maintenance.revoke(args.root)
+        elif action in {"stage", "restage"}:
+            if args.delta_file.stat().st_size > 400_000:
+                raise ValueError("delta file exceeds the bounded input size")
+            result = maintenance.stage(args.root, args.target, args.delta_file.read_text(encoding="utf-8"), args.source_ref,
+                                       replaces=args.id if action == "restage" else None)
+        elif action == "status":
+            result = maintenance.pending(args.root)
+        elif action == "apply":
+            result = maintenance.apply(args.root, args.id, args.commit)
+        else:
+            result = maintenance.cancel(args.root, args.id)
+        _json_print(result)
+        return 0
     if args.command == "guide-output":
         _json_print(output_guidance(args.name, args.cwd))
         return 0
@@ -391,6 +449,9 @@ def run(args: argparse.Namespace) -> int:
                 allow_draft=args.allow_draft,
                 min_score=args.min_score,
                 max_related=args.max_related,
+                context_sufficient=args.context_sufficient,
+                base_context=args.base_context,
+                view=args.view, max_facts=args.max_facts, max_chars=args.max_chars,
             )
         )
         return 0
@@ -647,7 +708,7 @@ def run(args: argparse.Namespace) -> int:
                     dry_run=False,
                     verified_adapters=VERIFIED_ADAPTERS,
                 )
-        _json_print(result)
+        _json_print(rebuild_summary(result, output, args.dry_run) if args.summary else result)
         return 0
     raise ValueError(f"unknown command: {args.command}")
 

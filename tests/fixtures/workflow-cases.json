@@ -1,0 +1,68 @@
+{
+  "kind": "invented_behavior_tasks_not_executable_assertions",
+  "instruction": "For each independent request, use only the supplied materials and the public Skill. Return the next action, minimal references/evidence needed, actual result state, what can be retained and its scope, and any missing authority. Do not access real sessions, private knowledge, external services or modify files. Do not assume every case needs a Skill or a knowledge write.",
+  "cases": [
+    {
+      "id": "inventory-only",
+      "request": "Use the Rebuilder to inventory only. I supplied the source directory and will choose where to store knowledge later. Do not reconstruct yet.",
+      "materials": ["An approved source directory is available to the executing host; no inventory result has been produced."]
+    },
+    {
+      "id": "sufficient-engineering-context",
+      "request": "Continue the Atlas retry patch. The current error, chosen retry policy and source are all supplied here. Do not remember this task.",
+      "materials": ["The approved change is to retry transient failures twice with the existing timeout. No historical decision is missing."]
+    },
+    {
+      "id": "missing-engineering-decision",
+      "request": "Recall my background worker retry decision for Atlas. The old decision is absent here. Use the approved published library.",
+      "materials": ["Only the prior retry choice is needed; biography and general collaboration preferences are irrelevant."]
+    },
+    {
+      "id": "manual-outcome-update",
+      "request": "The task is done. Give me the result and handle the maintenance I authorized.",
+      "materials": [
+        "Primary user previously authorized task-end maintenance of an approved human-maintained Markdown project page, not the generated library.",
+        "Observed tool result: prototype R2 runs on the test bench. No field deployment or user acceptance evidence exists.",
+        "The affected project page has not been inspected yet. No personal fact was needed to build the prototype."
+      ]
+    },
+    {
+      "id": "public-improvement-cutoff",
+      "request": "Improve the portable Skill from all the reviewed history in this supplied set. Prepare the local candidate; do not push or rebuild my library.",
+      "materials": [
+        "The supplied set contains exactly two dated dialogues with verified unchanged coverage.",
+        "A user approved fragments in a poem, but required complete technical sentences in an engineering report.",
+        "Another user asked for a one-line recap after full device validation; they did not ask to remove validation."
+      ]
+    },
+    {
+      "id": "additive-correction-and-status",
+      "request": "Why did the previous assistant include suppliers? Explain what it got wrong; the spreadsheet has already been handed off.",
+      "materials": [
+        "U1: Find eight potential customers, excluding suppliers and competitors, for a lab sensor.",
+        "U2: Add a contact method column.",
+        "A3: Produced eight suppliers with contact methods.",
+        "No request to replace or send a new spreadsheet exists."
+      ]
+    },
+    {
+      "id": "versions-and-acceptance",
+      "request": "Update this project's current state from the supplied record; do not generalize my visual preferences.",
+      "materials": [
+        "U1: The desktop exhibition keeps the 3D room. The mobile caption card uses a flat layout.",
+        "A2: Both builds passed unit tests.",
+        "U3: The mobile caption is approved, but the desktop room still does not load.",
+        "A4: I propose replacing all 3D assets. No user adoption or subsequent tool result is recorded."
+      ]
+    },
+    {
+      "id": "generated-library-interruption",
+      "request": "Is the authorized generated-library update finished? Use the supplied status; do not restart it.",
+      "materials": [
+        "The incremental rebuild completed and review is partially filled.",
+        "The completion report says needs_semantic_review. No distill or retrieval-suite result exists.",
+        "The host stopped before handoff. There is no configured scheduler."
+      ]
+    }
+  ]
+}

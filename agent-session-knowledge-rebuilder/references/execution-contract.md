@@ -142,7 +142,7 @@ A normal successful run has:
 - published knowledge whose indexed graph/status/run/document allowlist passes validation and excludes archives;
 - no pending retract/forget redistillation state;
 - all seven prerequisite publication gates independently rechecked by verification, Reader, and registration;
-- a retrieval-contract-2 eval set with at least two distinct related matches and two distinct hard-negative `no_match` cases, all passing;
+- a current retrieval-contract-3 eval set (legacy v0.5: contract 2) with at least two distinct related matches and two distinct hard-negative `no_match` cases, all passing; contract 3 also binds shared selection options and the engine version;
 - completion hashes that bind the exact retrieval-suite report and current published-file manifest;
 - a final report that preserves unsupported formats, operating-system and host limits, privacy results, fallbacks, and remaining work.
 

@@ -1,68 +1,63 @@
 ---
 name: agent-knowledge-reader
-description: Load only the reviewed personal, project, and collaboration knowledge relevant to the current task from a verified Agent-session knowledge base. Use after agent-session-knowledge-rebuilder has published the current run and passed the v0.5 multi-case retrieval gates. Refuse drafts, lifecycle-pending output, incomplete gates, and invented context.
+description: Retrieve verified personal history only when an explicit recall request or a missing past decision, personal fact, or established preference is necessary to answer. Skip when the current conversation or supplied files suffice. Generic writing, coding, research, project names, and continuing the current task alone do not trigger this skill. Read-only; never rebuild or update.
 ---
 
 # Agent Knowledge Reader
 
 Retrieve the smallest evidence-backed context set needed for the current task. This Skill is read-only: it does not rebuild sessions, edit knowledge, apply lifecycle changes, promote feedback, approve rules, register paths, or invent a bridge when retrieval returns no match.
 
-## Choose a launcher
+## Decide necessity before any private I/O
 
-Use an available Python 3.9+ launcher appropriate to the environment. Replace `<python>` below with it. Only the standard library is required. Do not install or upgrade a runtime without permission.
+First use the current request, conversation and supplied files. Internally name the exact missing fact and how it changes the answer. If none is missing, do not open the registry, base documents or histories. A mention of a company, product, "my computer", writing, CSS style, voice software or "continue" is not a personal-memory request.
 
-## Resolve a user-approved knowledge base
+Explicitly recalling an earlier decision, applying a previously established personal voice, or continuing a project whose relevant state is absent can justify retrieval. Query the missing fact and concrete project name, not the entire prompt. Current explicit instructions win over past preferences.
 
-When the user supplied no name or path, list local registrations:
+An explicitly supplied session, repository, draft or asset is a direct source, not
+a reason to preload a personal profile. If the user asks to read that source, read
+it within scope; use the KB only if a separate necessary gap remains. Stop unrelated
+history retrieval when the user says it is unnecessary. Retrieval scores rank
+documents after this decision; a named project match cannot prove necessity.
 
-```text
-<python> scripts/read_knowledge.py list
-```
-
-Use a confirmed registration name, or ask for the published knowledge-base path. Never scan the entire user directory or guess a location from project names. Read [references/registry-contract.md](references/registry-contract.md) when resolving, validating, or troubleshooting the registry.
-
-Registration is a private local path mapping. It does not prove that knowledge is current, grant write permission, erase cloud-sharing risk, or authorize rules outside their scope.
-
-## Query only for the current task
+If an orchestration layer has already dispatched the Reader although context suffices, use the no-I/O escape:
 
 ```text
-<python> scripts/read_knowledge.py query \
-  --name default \
-  --task "the current task"
+<python> scripts/read_knowledge.py query --task "current task" --context-sufficient
 ```
 
-Use `--kb /user-approved/private/kb` for a one-off path. Add `--emit-content` only when selected documents should enter the current context. When `--min-score`, `--max-projects`, and `--max-related` are omitted, the Reader uses the suite-level profile that passed verification. Supply an override only for an intentional diagnostic/alternate query; the receipt will mark `verified_profile_used: false`, so do not present it as the verified retrieval behavior.
+It returns `skipped` with zero documents without resolving a registry or knowledge base. It makes no publication claim or usage receipt. Prefer not invoking the Reader at all.
 
-The command fails closed unless all applicable publication checks pass:
+## Choose the needed context, then query
 
-- the index and graph are `published` and belong to the same run;
-- completion belongs to that run and publication passed;
-- unsupported candidates are clear or explicitly acknowledged without being upgraded to compatible;
-- a v0.5 knowledge base passed retrieval contract 2, including at least two related cases and two hard negatives;
-- the exact passed retrieval-suite audit still matches the report hash bound into completion;
-- current indexed knowledge files still match the manifest hashed during verification;
-- graph document nodes exactly match the safe non-archive index allowlist and every edge endpoint exists;
-- completion is `complete` or `complete_with_unsupported_formats`;
-- no lifecycle transaction journal exists, completion is not `lifecycle-applying`, and no retract/forget is waiting for redistillation and renewed retrieval verification.
+Only after necessity is established, read
+[references/retrieval-contract.md](references/retrieval-contract.md) for resolving
+an approved library, querying it and enforcing publication gates. Refusal is not
+permission to open drafts or rebuild the library inside this read-only Skill.
 
-The legacy one-related/one-unrelated pair is diagnostic only for a v0.5 publication. Do not interpret `legacy_pair_passed_needs_suite` as completion. Do not bypass any refusal by opening draft, archived, old-run, `lifecycle-applying`, or lifecycle-pending files as maintained knowledge. A pending transaction must be resumed with its exact original private plan; ask the user to run `$agent-session-knowledge-rebuilder` through the missing review, distillation, lifecycle recovery, or retrieval-suite gate.
+Use `--base-context none` for a missing project decision; use `identity`,
+`collaboration` or `both` only when those facts are actually needed. This selection
+is semantic and language-independent: a background worker is not personal
+background. It also prevents graph expansion from adding excluded base documents.
+Evidence rules still accompany a real match. `none` limits the returned context,
+not the integrity checks required to validate the publication.
 
-## Use the returned usage receipt
+Omitted options inherit the verified suite selection; older publications default
+to `auto`. That mode uses limited Chinese/English phrase inference, not a general
+intent classifier. Overrides appear in the usage receipt and are marked outside
+the suite's selection. Never use `both` as a convenience default. Unicode
+lexical matching supports more scripts, but does not translate or establish
+semantic relevance; the Agent still decides necessity and query wording.
 
-Every query returns `usage_receipt` alongside the selected documents. It contains:
-
-- receipt version and knowledge-base run id;
-- SHA-256 of the current task;
-- `matched` or `no_match`;
-- selected project keys and document paths;
-- actual `query_parameters` and whether `verified_profile_used` is true;
-- publication-manifest SHA-256.
-
-Use it when the current task needs to report which maintained knowledge was selected, or when auditing whether relevant context was retrieved before a separate behavior evaluation. The receipt is returned, not automatically written back. It does not prove that the Agent followed every selected rule, and it cannot approve, validate, or evolve one. The surrounding query output still contains the task text; only the receipt uses its hash.
+For a narrow fact or project continuation, read
+[references/context-views.md](references/context-views.md) and prefer `--view facts`
+or `--view current` when that publication supports it. Expand to full documents
+when omitted evidence, conflict or the user's requested scope requires it. Never
+silently treat missing current-state fields as facts or claim a compact view is
+a complete retrospective.
 
 ## Apply only active, confirmed, in-scope rules
 
-Always read the evidence rules first. Add identity or collaboration documents only when the task needs them, then select a small number of matching project histories and bounded confirmed one-hop links.
+For a matched query, read the returned evidence rules first. Add identity or collaboration units/documents only when the missing fact needs them, then read the selected project units or history needed to close that gap. Do not expand a sufficient compact answer into full history by ritual, or load all three base documents by default. Reuse already-read context within the task while the publication and question remain unchanged. For an explicitly complete project retrospective, expand to every relevant version chain and read it completely; bounded retrieval is not proof of exhaustive coverage.
 
 When a collaboration or expression document is selected:
 
@@ -72,15 +67,15 @@ When a collaboration or expression document is selected:
 - Never apply `candidate`, `rejected`, `disputed`, `retracted`, `stale`, forgotten, or out-of-scope material as instructions.
 - Never widen an artifact-, project-, or task-type rule merely because the current task looks similar.
 - The user's latest explicit instruction overrides older knowledge. Preserve and report a dated conflict instead of smoothing it away.
+- Bind corrections to the actual draft/version and recipient. Keep the original
+  purpose, audience and exclusions when a later message only adds a requirement.
+- Preserve result scope: configured, tested, real-use observed and user-accepted
+  are different; old successes or Agent summaries cannot overrule a later failure.
+- For writing, match a preference's actual author, genre, language and channel.
+  The requester, narrator, reviewer and reference author may differ. A style sample
+  supplies no biography; an old local edit is not a universal writing rule. Current
+  supplied prose and explicit transformation take priority over a retrieved style.
 
-## Respect retrieval and relationship boundaries
-
-- `index.graph.path` is authoritative. Never substitute another graph found on disk.
-- Require graph/index run equality, published status, a safe exact document allowlist, valid document paths, and existing edge endpoints.
-- Follow only confirmed graph edges, never more than the requested bound, and never traverse `archive/`.
-- A backlink is navigation, not a reversal of dependency, causality, correction, contradiction, or handoff.
-- A related document keeps its own scope. Do not transfer all statements across an edge.
-- Preserve disputed, stale, retracted, unsupported, incomplete, and completion-level boundaries in the answer.
-- When no indexed project or task-specific base document meets the threshold, return `no_match`.
+Reading and maintenance are independent. A task may need no personal history yet produce a durable project result. Under an explicit standing maintenance authorization, the host's task-end check may invoke the Rebuilder afterwards; this Reader itself remains read-only. See the Rebuilder's host-integration contract.
 
 `no_match` means this published index did not find sufficiently relevant maintained knowledge for that wording. It does not prove that no raw session ever mentioned the subject. Retry with a more precise task only when useful; never silently load the whole knowledge base or invent missing context.

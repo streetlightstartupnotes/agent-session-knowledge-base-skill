@@ -1,0 +1,57 @@
+{
+  "kind": "invented_behavior_tasks_not_executable_assertions",
+  "instruction": "Use the Skill to respond to each request using only its supplied history. Report retrieval/write actions you would take, scoped knowledge to retain or omit, and any bounded public mechanism. Do not actually write a knowledge base or publish anything.",
+  "cases": [
+    {
+      "id": "supplied-copy-no-history",
+      "request": "Polish this supplied sentence for a friendly invitation: The community session occurs Friday; bring your questions. All context is here. Do not remember this task.",
+      "history": []
+    },
+    {
+      "id": "voices-and-same-draft",
+      "request": "Review this writing history and say what a portable knowledge Skill should retain. Do not create a personal style profile.",
+      "history": [
+        "W1 user: I am coordinating an English essay for author Mira, aimed at engineers. Her sample is voice reference, not my biography. Keep the technical terms and headings.",
+        "W2 user: Reviewer's message A says make the opening concrete; message B says show evidence. Both refer to draft A. Nobody reviewed draft B.",
+        "W3 user: Mira's sample says 'I ran a mountain clinic'. Do not put that experience in this essay; it is unrelated.",
+        "W4 user: The new opening is good. The rest is not approved yet."
+      ]
+    },
+    {
+      "id": "explicit-thesis-change",
+      "request": "Review these changes for a private project record under existing maintenance permission; identify any general lesson.",
+      "history": [
+        "T1 user: The old leaflet leads with inexpensive transport.",
+        "T2 user: Change the main argument to accessible transport. Low cost remains true but is no longer the headline promise.",
+        "T3 user: This is a Japanese public leaflet; make it conversational, unlike my technical English report."
+      ]
+    },
+    {
+      "id": "layout-and-delivery",
+      "request": "Summarize this document task's actual state and scoped lesson.",
+      "history": [
+        "L1 user: Only lay out the supplied text as a document. Keep wording unchanged.",
+        "L2 agent: I included every paragraph, added a promotional introduction and {{author}} footer. Validation passed.",
+        "L3 user: The last section should look like ordinary body text, not a quotation card.",
+        "L4 tool: draft.html exists; no document file or sending record is supplied.",
+        "L5 user: Give me the document file, not just text or HTML."
+      ]
+    },
+    {
+      "id": "fiction-and-author",
+      "request": "Identify what can enter project knowledge, not biography, from this record.",
+      "history": [
+        "F1 user: Write a fictional first-person story in narrator Sol's voice. Sol buys a moon railway; disclose the fiction at the end.",
+        "F2 user: I like draft B's plot. Enrich the scenes without changing that plot.",
+        "F3 agent: Final prose delivered in chat. No saved file or publication evidence."
+      ]
+    },
+    {
+      "id": "scope-of-skill-review",
+      "request": "Use the reviewed writing history supplied here to improve the general knowledge Skill. The full record has one item and is current. I authorize a local Skill patch, but no knowledge-base rebuild, registration or publication.",
+      "history": [
+        "S1 user: In this poem, preserve fragments and semicolons. In tomorrow's report, use complete sentences and numbered headings."
+      ]
+    }
+  ]
+}

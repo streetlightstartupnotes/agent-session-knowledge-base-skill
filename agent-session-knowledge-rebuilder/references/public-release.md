@@ -2,6 +2,24 @@
 
 The repository contains executable Skill logic and generic documentation only. It must not contain real sessions, generated knowledge, audit output, local registry state, machine-specific validation reports, private paths, contacts, credentials, cookies, binary bodies, or a person's facts.
 
+Keep portable mechanisms separate from private configuration: no fixed user's
+language, occupation, destinations, preferred apps, writing prohibitions or
+standing permissions. Installation does not grant task-end write permission.
+Exercise contrasting synthetic users and domains when changing behavior; retain
+the result privately and state whether it is a script test, an independent Agent
+scenario, or real-host evidence. None substitutes for the others.
+
+Package only the two Skill folders, license, public documentation and invented
+development tests. Do not copy the working directory wholesale. Scan the exact
+staged package as well as source, verify its member list, and bind the archive to
+the scanned bytes. Keep private reports and deny-term files outside it. A locally
+prepared candidate is not a pushed commit, tag or published release.
+
+For source changes, run the relevant unit tests and, when adapter handling changes,
+the synthetic golden pack. The latter lives in the development repository, not
+necessarily in an installed Skill. Public-source validation is not an extra gate
+for an ordinary private Markdown update or read-only recall.
+
 Describe the distribution accurately as source code published under a noncommercial limited license. Do not call it MIT-licensed or OSI open source, and do not let a source release imply permission to publish a user's sessions or generated knowledge.
 
 Run `release-check` against the directory that will be published. It reports only finding type, relative file, and line number; it never prints the matched value. For private names, organizations, project codenames, or identifiers, prefer repeated `--deny-term-file` arguments that point to newline-delimited files outside the release root. This keeps the terms out of the repository and reduces command-line history exposure. `--deny-term` remains available for controlled use. Never save private deny terms in scripts, fixtures, committed shell history, or CI configuration.

@@ -8,6 +8,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
+from .sanitize import LABELED_SECRET_RE, NATIONAL_ID_RE, PROXY_LOGIN_RE, VENDOR_KEY_RE
+
 
 TEXT_SUFFIXES = {
     ".css",
@@ -41,6 +43,10 @@ DATA_URL_BASE64_RE = re.compile(
 )
 
 SENSITIVE_PATTERNS = {
+    "vendor_key": VENDOR_KEY_RE,
+    "proxy_login": PROXY_LOGIN_RE,
+    "labeled_secret": LABELED_SECRET_RE,
+    "national_id": NATIONAL_ID_RE,
     "private_key": re.compile(r"-----BEGIN (?:(?:ENCRYPTED|OPENSSH|RSA|EC|DSA) )?PRIVATE KEY-----"),
     "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     "huggingface_token": re.compile(r"\bhf_[A-Za-z0-9]{8,}\b"),

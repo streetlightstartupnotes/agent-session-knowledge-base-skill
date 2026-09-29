@@ -62,6 +62,15 @@ Before semantic review, the identity, collaboration, and project files are expli
 
 `knowledge-index.json` powers task-scoped retrieval and records the feedback-governed evolution summary. The graph path declared in `index.graph.path` is authoritative when present; only the fixed default is used when the field is absent. Query, Reader, and publication-manifest validation use the same graph loader. It requires graph `semantic_status: published`, the same run id as the index, safe unique indexed document paths, exact equality between graph document nodes and the index document allowlist, indexed `document_path` references, and existing edge endpoints. Any path rooted at `archive/` is rejected rather than traversed.
 
+Index version 5 adds optional `context_units` to document entries, derived only
+from validated claims/history, plus reviewed project `current_state` references.
+Units retain source event IDs, evidence timestamps when known, publication run,
+status, applicability and corrections; base units retain conflicts, supersession
+and governed evolution metadata. These bodies share the private index's manifest
+and lifecycle boundaries. Retract/forget discard derived compact views before
+redistillation; they are never served from stale caches. Old indexes without units
+report compact views unavailable instead of fabricating a summary.
+
 The validated graph contains document, base-claim, granular project-assertion, feedback-signal, and rule-evolution nodes plus confirmed, uncertain, or rejected edges with direction, rationale, evidence basis, and evidence ids. A project-relationship edge records assertion anchors when its evidence ids support published history items at both endpoints. Project and base documents receive reciprocal `Related knowledge` navigation only for confirmed document edges. The query command returns evidence rules, matching base/project documents, and at most the requested number of one-hop confirmed related documents.
 
 `archive/<run-id>/` contains prior generated project documents absent from the current reviewed publication, including documents made stale by title/path changes. Archive creation rejects symlinked stale sources, archive parents, run directories, destinations, or resolved containment escapes. Archives are not listed as current index documents and the normal Reader rejects their paths rather than retrieving them. They remain private historical material and retain the same privacy handling as current knowledge.
@@ -86,7 +95,15 @@ Likewise, zero reported coverage gaps means zero gaps inside the declared discov
 
 Verification, Reader, and registration independently require the prerequisite gates `frozen_snapshot`, `transport_accounted`, `parse_clean`, `discovery_coverage_complete`, `semantic_review_complete`, `knowledge_graph_complete`, and `published_knowledge`. Unsupported candidates must also be clear or explicitly acknowledged. One successful caller cannot stand in for another's check.
 
-`distill` sets completion to `needs_retrieval_verification` and retrieval contract version 2. Semantic publication alone is not final. `verify-retrieval --eval-set` needs at least two distinct related tasks and two distinct hard negatives after privacy cleanup. Related cases may require project keys, document types, and minimum project matches; hard negatives must return `no_match`. Every case must pass.
+`distill` sets completion to `needs_retrieval_verification` and retrieval contract version 3. Semantic publication alone is not final. `verify-retrieval --eval-set` needs at least two distinct related tasks and two distinct hard negatives after privacy cleanup. Related cases may require project keys, document types, minimum project matches and actual context-unit counts; hard negatives must return `no_match`. Every case must pass.
+
+Contract 3 additionally binds `retrieval_engine_version` and suite-wide
+`selection_options` (`base_context`, `view`, `max_facts`, `max_chars`) in report,
+completion and suite hash. These must match the executing engine. Omitted Reader
+options inherit the verified selection; different overrides are marked unverified.
+Older contract-2 reports keep their safety checks but cannot attest to a new engine.
+Usage receipts also expose emitted-content character counts, not token or I/O
+savings. No behavior telemetry is persisted without a separate explicit purpose.
 
 `audit/retrieval-verification.json` stores one suite-level `retrieval_profile` (`min_score`, `max_projects`, `max_related`), task hashes, redaction counts, selection summaries, expected-key hashes, expected document types, `min_project_matches`, pass/fail states, suite hash, and a size/hash manifest of indexed knowledge files—not task text or selected document contents. Per-case profile overrides are rejected. The suite hash binds the shared profile plus every task kind/hash, expected key/type constraint, and `min_project_matches`. Completion stores the same profile, suite hash, publication-manifest hash, and a canonical `retrieval_verification_sha256` binding the exact report. Only after `retrieval_related_suite` and `retrieval_hard_negative_suite` pass may completion become `complete` or `complete_with_unsupported_formats`.
 
